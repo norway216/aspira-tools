@@ -166,11 +166,18 @@ scanner_start_one(const scan_target_t *target)
     /* Initiate non-blocking connect */
     int ret = sk_connect_nonblock(fd, target->ip, target->port);
     if (ret < 0) {
-        /* Immediate failure */
-        close(fd);
-        reactor_socket_free_entry(g_reactor, se);
-        fd_mgr_release(fdm);
-        return -2;
+        /*
+         * Immediate failure (e.g. ECONNREFUSED on localhost).
+         * Build a result so this port is reported, not silently dropped.
+         * scanner_finalize() handles fd close, epoll cleanup, and fd_mgr release.
+         */
+        sk_state_t st = (errno == ECONNREFUSED) ? SK_CLOSED : SK_ERROR;
+        se->fd     = fd;
+        se->state  = st;
+        se->target = *target;
+        se->rtt_ms = 0;
+        scanner_finalize(se, st);
+        return 0;  /* counted as submitted, result emitted */
     }
 
     /* Populate socket entry */
@@ -395,7 +402,14 @@ scanner_on_timeout(void *arg)
 void
 scanner_on_error(socket_entry_t *se)
 {
-    scanner_finalize(se, SK_ERROR);
+    /*
+     * EPOLLERR fires for various reasons. Check SO_ERROR to distinguish:
+     *   ECONNREFUSED → port is actively closed (CLOSED)
+     *   other        → genuine error (ERROR)
+     */
+    int err = sk_get_error(se->fd);
+    sk_state_t final_state = (err == ECONNREFUSED) ? SK_CLOSED : SK_ERROR;
+    scanner_finalize(se, final_state);
 }
 
 /* ============================================================

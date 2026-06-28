@@ -58,12 +58,20 @@ print_result_text(const scan_result_t *r)
     char ip_str[NA_IP_STR_LEN];
     na_ip_to_str(r->target.ip, ip_str, sizeof(ip_str));
 
-    printf("%-16s %-6u %-10s %-10s %4dms  %s\n",
+    /* RTT display: only meaningful for successful connections */
+    char rtt_str[16];
+    if (r->rtt_ms >= 0) {
+        snprintf(rtt_str, sizeof(rtt_str), "%dms", r->rtt_ms);
+    } else {
+        snprintf(rtt_str, sizeof(rtt_str), "N/A");
+    }
+
+    printf("%-16s %-6u %-10s %-10s %6s  %s\n",
            ip_str,
            na_port_host(r->target.port),
            sk_state_label(r->state),
            r->service,
-           r->rtt_ms,
+           rtt_str,
            r->banner[0] ? r->banner : "-");
 }
 
@@ -73,14 +81,25 @@ print_result_json(const scan_result_t *r)
     char ip_str[NA_IP_STR_LEN];
     na_ip_to_str(r->target.ip, ip_str, sizeof(ip_str));
 
-    printf("{\"ip\":\"%s\",\"port\":%u,\"state\":\"%s\","
-           "\"rtt_ms\":%d,\"service\":\"%s\",\"banner\":\"%s\"}\n",
-           ip_str,
-           na_port_host(r->target.port),
-           sk_state_label(r->state),
-           r->rtt_ms,
-           r->service,
-           r->banner);
+    /* RTT: only meaningful for OPEN connections */
+    if (r->rtt_ms >= 0) {
+        printf("{\"ip\":\"%s\",\"port\":%u,\"state\":\"%s\","
+               "\"rtt_ms\":%d,\"service\":\"%s\",\"banner\":\"%s\"}\n",
+               ip_str,
+               na_port_host(r->target.port),
+               sk_state_label(r->state),
+               r->rtt_ms,
+               r->service,
+               r->banner);
+    } else {
+        printf("{\"ip\":\"%s\",\"port\":%u,\"state\":\"%s\","
+               "\"rtt_ms\":null,\"service\":\"%s\",\"banner\":\"%s\"}\n",
+               ip_str,
+               na_port_host(r->target.port),
+               sk_state_label(r->state),
+               r->service,
+               r->banner);
+    }
 }
 
 /* ============================================================
