@@ -1,0 +1,26 @@
+[Unit]
+Description=Medical-Grade Disk Health Monitoring Daemon
+Documentation=https://github.com/yourorg/disk-health-check
+After=multi-user.target
+Wants=local-fs.target
+
+[Service]
+Type=forking
+ExecStart=/usr/local/bin/disk_health
+ExecReload=/bin/kill -HUP $MAINPID
+ExecStop=/bin/kill -TERM $MAINPID
+PIDFile=/var/run/disk_healthd.pid
+Restart=always
+RestartSec=5
+StandardOutput=null
+StandardError=null
+
+# Security hardening
+CapabilityBoundingSet=CAP_SYS_RAWIO
+ProtectSystem=strict
+ReadWritePaths=/var/log/disk_health
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
