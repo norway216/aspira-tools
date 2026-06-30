@@ -1,0 +1,12 @@
+{
+  "chip": "AIC8800D80",
+  "vendor_id": "0xa69c",
+  "product_id": "0x5721",
+  "driver_abi": "1.2",
+  "firmware_version": "2026.06.30",
+  "min_kernel": "5.10",
+  "sha256": {
+    "wifi_fw.bin": "REPLACE_WITH_ACTUAL_SHA256",
+    "rf_config.bin": "REPLACE_WITH_ACTUAL_SHA256"
+  }
+}
