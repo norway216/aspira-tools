@@ -48,6 +48,7 @@ struct aic_txq {
 	atomic_t            stopped;
 	atomic_t            dropped;
 	atomic_t            completed;
+	atomic_t            qlen;         /* cached combined queue length */
 
 	struct work_struct  tx_work;
 

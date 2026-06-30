@@ -474,6 +474,9 @@ int aic_usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 		goto err_fw_release;
 	}
 
+	/* Initialize NAPI (requires netdev to exist) */
+	aic_rxq_napi_init(adev);
+
 	/* Register with cfg80211 */
 	ret = aic_cfg80211_register(adev);
 	if (ret) {
