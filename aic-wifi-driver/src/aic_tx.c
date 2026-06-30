@@ -39,6 +39,7 @@ int aic_txq_init(struct aic_txq *txq)
 	atomic_set(&txq->stopped, 0);
 	atomic_set(&txq->dropped, 0);
 	atomic_set(&txq->completed, 0);
+	atomic_set(&txq->qlen, 0);
 
 	txq->wrr_next_ac = AIC_TX_AC_VO;
 	txq->wrr_credit[AIC_TX_AC_VO] = AIC_TXQ_WRR_WEIGHT_VO;
@@ -168,11 +169,11 @@ netdev_tx_t aic_tx_queue_frame(struct aic_dev *adev, struct sk_buff *skb)
 
 	__skb_queue_tail(&adev->txq.ac[ac], skb);
 
-	/* Flow control: stop queue if above high watermark */
-	qlen = skb_queue_len(&adev->txq.ac[AIC_TX_AC_BE]) +
-	       skb_queue_len(&adev->txq.ac[AIC_TX_AC_BK]) +
-	       skb_queue_len(&adev->txq.ac[AIC_TX_AC_VI]) +
-	       skb_queue_len(&adev->txq.ac[AIC_TX_AC_VO]);
+	/* Flow control: stop queue if above high watermark.
+	 * Use atomic qlen (increment once per enqueue, decrement
+	 * once per dequeue) instead of summing 4 queues every time.
+	 */
+	qlen = atomic_inc_return(&adev->txq.qlen);
 
 	if (qlen >= adev->txq.high_watermark) {
 		if (atomic_read(&adev->txq.stopped) == 0) {
@@ -227,6 +228,9 @@ void aic_tx_work(struct work_struct *work)
 			break;
 		}
 
+			/* Decrement cached qlen on dequeue */
+			atomic_dec(&txq->qlen);
+
 		spin_unlock_irq(&adev->txq.lock);
 
 		/* Get a free TX URB */
@@ -235,6 +239,7 @@ void aic_tx_work(struct work_struct *work)
 			/* No TX URB available — requeue and stop */
 			spin_lock_irq(&adev->txq.lock);
 			__skb_queue_head(&txq->ac[ac], skb);
+				atomic_inc(&txq->qlen); /* requeue = re-increment */
 			spin_unlock_irq(&adev->txq.lock);
 			goto out;
 		}
@@ -263,15 +268,9 @@ void aic_tx_work(struct work_struct *work)
 	}
 
 out:
-	/* Wake queue if below low watermark */
+	/* Wake queue if below low watermark -- use cached atomic qlen */
 	{
-		int qlen;
-		spin_lock_irq(&adev->txq.lock);
-		qlen = skb_queue_len(&txq->ac[AIC_TX_AC_BE]) +
-		       skb_queue_len(&txq->ac[AIC_TX_AC_BK]) +
-		       skb_queue_len(&txq->ac[AIC_TX_AC_VI]) +
-		       skb_queue_len(&txq->ac[AIC_TX_AC_VO]);
-		spin_unlock_irq(&adev->txq.lock);
+		int qlen = atomic_read(&txq->qlen);
 
 		if (qlen <= txq->low_watermark &&
 		    atomic_read(&txq->stopped)) {
@@ -282,13 +281,7 @@ out:
 
 	/* Re-schedule if more work remains */
 	if (processed >= 32) {
-		int remaining;
-		spin_lock_irq(&adev->txq.lock);
-		remaining = skb_queue_len(&txq->ac[AIC_TX_AC_BE]) +
-			    skb_queue_len(&txq->ac[AIC_TX_AC_BK]) +
-			    skb_queue_len(&txq->ac[AIC_TX_AC_VI]) +
-			    skb_queue_len(&txq->ac[AIC_TX_AC_VO]);
-		spin_unlock_irq(&adev->txq.lock);
+		int remaining = atomic_read(&txq->qlen);
 		if (remaining > 0)
 			queue_work(adev->wq, &txq->tx_work);
 	}
@@ -368,4 +361,5 @@ void aic_tx_flush_all(struct aic_dev *adev)
 		skb_queue_purge(&adev->txq.ac[i]);
 
 	atomic_set(&adev->tx_pending, 0);
+	atomic_set(&adev->txq.qlen, 0);
 }

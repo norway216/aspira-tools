@@ -42,8 +42,9 @@ struct aic_rxq {
 /* RX Path API                                                         */
 /* ================================================================== */
 
-int  aic_rxq_init(struct aic_rxq *rxq);
-void aic_rxq_deinit(struct aic_rxq *rxq);
+int  aic_rxq_init(struct aic_dev *adev);
+int  aic_rxq_napi_init(struct aic_dev *adev);
+void aic_rxq_deinit(struct aic_dev *adev);
 
 /* URB completion handler */
 void aic_rx_complete(struct urb *urb);
@@ -51,11 +52,12 @@ void aic_rx_complete(struct urb *urb);
 /* Process raw RX data (common for both URB and re-submit paths) */
 int  aic_rx_process_data(struct aic_dev *adev, const u8 *data, size_t len);
 
-/* NAPI poll callback (if using NAPI) */
+/* NAPI poll callback */
 int  aic_rx_napi_poll(struct napi_struct *napi, int budget);
 
 /* Submit/re-submit RX URBs */
 int  aic_rx_submit_urbs(struct aic_dev *adev);
+int  aic_rx_resubmit_batch(struct aic_dev *adev, int count);
 void aic_rx_flush(struct aic_dev *adev);
 
 /* Protocol delivery */

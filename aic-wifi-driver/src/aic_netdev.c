@@ -16,6 +16,7 @@
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/ieee80211.h>
+#include <linux/rtnetlink.h>
 
 /* ================================================================== */
 /* net_device_ops: open                                                 */
@@ -177,9 +178,10 @@ int aic_netdev_setup(struct aic_dev *adev)
 
 	ndev->netdev_ops = &aic_netdev_ops;
 
-	/* Set device features */
-	ndev->features |= NETIF_F_HW_CSUM | NETIF_F_SG;
+	/* Set device features — enable GRO for RX aggregation */
+	ndev->features |= NETIF_F_HW_CSUM | NETIF_F_SG | NETIF_F_GRO;
 	ndev->hw_features = ndev->features;
+	ndev->vlan_features = ndev->features;
 
 	/* Set TX timeout */
 	ndev->watchdog_timeo = msecs_to_jiffies(AIC_TX_TIMEOUT_MS);
@@ -192,8 +194,10 @@ int aic_netdev_setup(struct aic_dev *adev)
 
 	aic_eth_hw_addr_set(ndev, mac);
 
-	/* Register net device */
-	ret = register_netdev(ndev);
+	/* Register net device (requires rtnl_lock) */
+	rtnl_lock();
+	ret = register_netdevice(ndev);
+	rtnl_unlock();
 	if (ret) {
 		aic_err(adev, "register_netdev failed: %d\n", ret);
 		free_netdev(ndev);
@@ -215,7 +219,9 @@ void aic_netdev_teardown(struct aic_dev *adev)
 	aic_info(adev, "unregistering netdev %s\n",
 		 netdev_name(adev->ndev));
 
-	unregister_netdev(adev->ndev);
+	rtnl_lock();
+	unregister_netdevice(adev->ndev);
+	rtnl_unlock();
 	free_netdev(adev->ndev);
 	adev->ndev = NULL;
 
