@@ -282,8 +282,8 @@ config_expand_targets(const na_config_t *cfg,
     if (slash) {
         *slash = '\0';
         int prefix = atoi(slash + 1);
-        if (prefix < 0 || prefix > 32) {
-            fprintf(stderr, "Error: invalid CIDR prefix /%d\n", prefix);
+        if (prefix < 1 || prefix > 32) {
+            fprintf(stderr, "Error: invalid CIDR prefix /%d (must be 1-32)\n", prefix);
             return -1;
         }
 
@@ -294,7 +294,7 @@ config_expand_targets(const na_config_t *cfg,
         }
 
         uint32_t base = ntohl(in.s_addr);
-        uint32_t mask = (prefix == 0) ? 0 : (~0U << (32 - (unsigned int)prefix));
+        uint32_t mask = ~0U << (32 - (unsigned int)prefix);
         ip_start = base & mask;
         ip_end   = ip_start | (~mask);
 

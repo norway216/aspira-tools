@@ -1,11 +1,12 @@
 /*
- * queue.c — Lock-Free SPSC Ring Buffer
+ * queue.c — Lock-Free SPSC Ring Buffer (C11 atomics)
  *
  * Single-producer (reactor thread), single-consumer (main thread).
- * Uses memory barriers instead of locks for zero contention in hot path.
+ * Uses C11 atomic_thread_fence for portability (Fix #9).
  * One slot is always kept empty → effective capacity = NA_RING_SIZE - 1.
  */
 #include "queue.h"
+#include <stdatomic.h>
 
 /* ---- Lifecycle ---- */
 
@@ -23,19 +24,14 @@ ring_push(ring_queue_t *q, const scan_result_t *item)
 {
     int next = (q->head + 1) % NA_RING_SIZE;
 
-    /* Full: next would overwrite tail (kept-empty slot) */
     if (next == q->tail) {
-        return -1;
+        return -1;   /* full */
     }
 
     q->items[q->head] = *item;
 
-    /*
-     * Full memory barrier: ensure the item copy is visible before
-     * the head pointer advances. On x86 this is an mfence; on ARM
-     * it's a dmb. Required for correctness on weakly-ordered CPUs.
-     */
-    __sync_synchronize();
+    /* C11 full memory barrier — portable across x86, ARM, RISC-V */
+    atomic_thread_fence(memory_order_seq_cst);
 
     q->head = next;
     return 0;
@@ -46,14 +42,13 @@ ring_push(ring_queue_t *q, const scan_result_t *item)
 int
 ring_pop(ring_queue_t *q, scan_result_t *item)
 {
-    /* Empty */
     if (q->tail == q->head) {
-        return -1;
+        return -1;   /* empty */
     }
 
     *item = q->items[q->tail];
 
-    __sync_synchronize();
+    atomic_thread_fence(memory_order_seq_cst);
 
     q->tail = (q->tail + 1) % NA_RING_SIZE;
     return 0;

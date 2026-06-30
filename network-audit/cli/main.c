@@ -32,20 +32,21 @@ static void
 sig_handler(int sig)
 {
     (void)sig;
-    g_shutdown = 1;
+    atomic_store(&g_shutdown, 1);
 }
 
-static void
+static int
 setup_signals(void)
 {
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = sig_handler;
     sa.sa_flags   = SA_RESTART;
-    sigaction(SIGINT,  &sa, NULL);
-    sigaction(SIGTERM, &sa, NULL);
+    if (sigaction(SIGINT,  &sa, NULL) < 0) return -1;
+    if (sigaction(SIGTERM, &sa, NULL) < 0) return -1;
     /* Ignore SIGPIPE — we handle EPIPE via epoll */
     signal(SIGPIPE, SIG_IGN);
+    return 0;
 }
 
 /* ============================================================
@@ -147,7 +148,10 @@ result_callback(const scan_result_t *result, void *ctx)
         strncpy(row.service, result->service, sizeof(row.service) - 1);
         row.state    = (int)result->state;
         row.last_seen = (int64_t)time(NULL);
-        db_store_asset(&row);
+        /* Fix #19: check return value */
+        if (db_store_asset(&row) < 0) {
+            fprintf(stderr, "Warning: failed to store asset to DB\n");
+        }
     }
 }
 
@@ -179,7 +183,9 @@ main(int argc, char *argv[])
             cfg.concurrency, cfg.timeout_ms);
 
     /* ---- 3. Setup signals ---- */
-    setup_signals();
+    if (setup_signals() < 0) {
+        fprintf(stderr, "Warning: signal setup failed, Ctrl-C may not work\n");
+    }
 
     /* ---- 4. Initialize fingerprint DB ---- */
     fp_init_default(&g_fp_db);
@@ -260,6 +266,7 @@ main(int argc, char *argv[])
     fprintf(stderr, "Submitting %d targets...\n", n_targets);
 
     int64_t t_start = na_now_ms();
+    scanner_set_timeout_ms(cfg.timeout_ms);
     int submitted = scanner_submit_targets(targets, n_targets);
     if (submitted < n_targets) {
         fprintf(stderr,

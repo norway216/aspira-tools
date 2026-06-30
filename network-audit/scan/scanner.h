@@ -16,6 +16,7 @@ void scanner_cleanup(void);
 
 /* ---- Target submission ---- */
 int  scanner_submit_targets(const scan_target_t *targets, int count);
+void scanner_set_timeout_ms(int ms);
 
 /* ---- Event handler (registered with reactor) ---- */
 void scanner_on_event(struct epoll_event *ev, void *ctx);

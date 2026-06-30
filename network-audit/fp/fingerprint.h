@@ -10,7 +10,7 @@
 void fp_init_default(fp_db_t *db);
 
 /* ---- Matching ---- */
-fp_service_t fp_match(const char *banner, int banner_len);
+fp_service_t fp_match(const fp_db_t *db, const char *banner, int banner_len);
 const char  *fp_service_name(fp_service_t s);
 
 /* ---- Custom patterns ---- */
