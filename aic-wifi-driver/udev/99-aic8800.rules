@@ -1,0 +1,18 @@
+# AIC8800 USB WiFi Driver — udev Rules
+#
+# Place at /etc/udev/rules.d/99-aic8800.rules
+#
+
+# AIC8800 native VID/PID
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="a69c", ATTR{idProduct}=="5721", RUN+="/sbin/modprobe aic8800_fdrv"
+
+# TP-Link / other branded variants using AIC8800
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="2357", ATTR{idProduct}=="014e", RUN+="/sbin/modprobe aic8800_fdrv"
+
+# Set power/control to "on" when autosuspend is disabled
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="a69c", ATTR{idProduct}=="5721", ATTR{power/control}="on"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="2357", ATTR{idProduct}=="014e", ATTR{power/control}="on"
+
+# USB modeswitch for devices that appear in storage mode first
+# Uncomment and adjust VID/PID if your device needs modeswitch:
+# ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="a69c", ATTR{idProduct}=="5723", RUN+="/usr/sbin/usb_modeswitch -KQ -v a69c -p 5721"

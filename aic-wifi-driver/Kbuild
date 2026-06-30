@@ -1,0 +1,41 @@
+# AIC8800 USB WiFi Driver — Kernel Build System
+#
+# Single module aic8800_fdrv.ko built from all source files.
+# Uses the Linux kernel Kbuild framework for out-of-tree modules.
+#
+# Build:  make -C /lib/modules/$(uname -r)/build M=$(PWD) modules
+# Clean:  make -C /lib/modules/$(uname -r)/build M=$(PWD) clean
+#
+
+# Module name
+obj-m := aic8800_fdrv.o
+
+# All source files compiled into the single module
+aic8800_fdrv-y := \
+	src/aic_main.o \
+	src/aic_usb.o \
+	src/aic_hci.o \
+	src/aic_fw.o \
+	src/aic_cmd.o \
+	src/aic_event.o \
+	src/aic_tx.o \
+	src/aic_rx.o \
+	src/aic_cfg80211.o \
+	src/aic_netdev.o \
+	src/aic_pm.o \
+	src/aic_recovery.o \
+	src/aic_stats.o \
+	src/aic_debugfs.o
+
+# Include paths
+ccflags-y := -I$(src)/include
+
+# Compiler flags
+ccflags-y += -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers
+ccflags-y += -DKBUILD_MODNAME=\"aic8800_fdrv\"
+
+# For kernel 5.10+ compatibility
+ccflags-$(CONFIG_AIC8800_DEBUG) += -DDEBUG
+
+# Tracepoint support
+# CFLAGS_aic_trace.o := -I$(src)
