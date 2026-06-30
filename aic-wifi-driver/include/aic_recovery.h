@@ -75,6 +75,9 @@ struct aic_recovery {
 
 	struct aic_recovery_rate_limit rl;
 	bool                       enabled;
+
+	/* Per-device heartbeat tracking (not static) */
+	int                        heartbeat_miss_count;
 };
 
 /* ================================================================== */

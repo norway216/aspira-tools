@@ -40,8 +40,7 @@ int aic_cmd_mgr_init(struct aic_cmd_mgr *mgr)
 
 void aic_cmd_mgr_deinit(struct aic_cmd_mgr *mgr)
 {
-	aic_cmd_flush_all(NULL); /* flush with NULL dev for final cleanup */
-	/* Note: full flush uses mgr directly */
+	/* Complete all pending commands before freeing */
 	spin_lock(&mgr->lock);
 	for (int i = 0; i < AIC_CMD_QUEUE_DEPTH; i++) {
 		if (mgr->queue[i].state != AIC_CMD_FREE) {

@@ -133,6 +133,13 @@ int aic_rx_process_data(struct aic_dev *adev, const u8 *data, size_t len)
 			/* Data frame — deliver to protocol stack */
 			struct sk_buff *skb;
 
+			/* Skip fragmented frames — only process complete ones */
+			if (!(hdr->flags & AIC_HCI_FLAG_LAST_FRAG)) {
+				aic_dbg(adev, "RX fragmented data frame ignored "
+					"(flags=0x%02x)\n", hdr->flags);
+				break;
+			}
+
 			skb = alloc_skb(payload_len + 64, GFP_ATOMIC);
 			if (!skb) {
 				aic_stats_inc(&adev->stats.rx_dropped);

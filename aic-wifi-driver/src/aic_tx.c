@@ -65,7 +65,7 @@ void aic_txq_deinit(struct aic_txq *txq)
 
 enum aic_tx_ac aic_tx_classify_skb(struct sk_buff *skb)
 {
-	u8 dscp;
+	u8 dscp = 0;
 	u8 priority;
 
 	/* Use skb->priority if set by upper layers */
@@ -213,6 +213,10 @@ void aic_tx_work(struct work_struct *work)
 		return;
 
 	while (processed < 32) { /* batch limit per work invocation */
+		/* Yield CPU if needed to avoid soft lockup */
+		if (need_resched())
+			cond_resched();
+
 		spin_lock_irq(&adev->txq.lock);
 
 		/* Select next queue via WRR */
@@ -300,6 +304,10 @@ void aic_tx_complete_cb(struct urb *urb)
 	struct aic_dev *adev = ctx->adev;
 
 	usb_unanchor_urb(urb);
+
+	/* Always decrement inflight and pending counters */
+	atomic_dec(&adev->usb.tx_urb_inflight);
+	atomic_dec(&adev->tx_pending);
 
 	if (adev->removing || adev->surprise_removed) {
 		aic_usb_put_tx_ctx(adev, ctx);

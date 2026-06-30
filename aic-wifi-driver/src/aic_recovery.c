@@ -265,37 +265,45 @@ int aic_recovery_execute(struct aic_dev *adev)
 			aic_err(adev, "FW soft reset failed: %d\n", ret);
 			adev->recovery.fail_count++;
 			aic_stats_inc(&adev->stats.recovery_failures);
-			/* Escalate to USB reset */
-			aic_recovery_schedule(adev, AIC_RECOVERY_USB_RESET,
-					      AIC_RECOVERY_REASON_FW_CRASH);
-			break;
-		}
-
-		/* Wait for firmware ready */
-		ret = aic_fw_wait_ready(adev, 5000);
-		if (ret) {
-			aic_err(adev, "FW ready wait failed after reset\n");
-			adev->recovery.fail_count++;
-			aic_stats_inc(&adev->stats.recovery_failures);
-			break;
-		}
-
-		aic_rx_submit_urbs(adev);
-
-		if (adev->bssid[0] && adev->ndev) {
 			/*
-			 * Was connected — firmware lost association.
-			 * Notify cfg80211 to trigger reconnection.
+			 * Escalate to USB reset directly (not via schedule
+			 * which checks reset_pending and would silently
+			 * drop the escalation).
 			 */
-			aic_cfg80211_notify_disconnect(adev,
-				WLAN_REASON_PREV_AUTH_NOT_VALID);
-			aic_state_set(adev, AIC_STATE_NETDEV_REGISTERED);
+			adev->recovery.level = AIC_RECOVERY_USB_RESET;
+			adev->recovery.last_reason =
+				AIC_RECOVERY_REASON_FW_CRASH;
+			/* Fall through to USB_RESET case below */
 		} else {
-			aic_state_set(adev, AIC_STATE_NETDEV_REGISTERED);
-		}
+			/* Wait for firmware ready */
+			ret = aic_fw_wait_ready(adev, 5000);
+			if (ret) {
+				aic_err(adev, "FW ready wait failed after "
+					"reset\n");
+				adev->recovery.fail_count++;
+				aic_stats_inc(&adev->stats.recovery_failures);
+				break;
+			}
 
-		aic_stats_inc(&adev->stats.recovery_count);
-		break;
+			aic_rx_submit_urbs(adev);
+
+			if (adev->bssid[0] && adev->ndev) {
+				/*
+				 * Was connected — firmware lost association.
+				 * Notify cfg80211 to trigger reconnection.
+				 */
+				aic_cfg80211_notify_disconnect(adev,
+					WLAN_REASON_PREV_AUTH_NOT_VALID);
+			}
+			aic_state_set(adev, AIC_STATE_NETDEV_REGISTERED);
+			aic_stats_inc(&adev->stats.recovery_count);
+			break;
+		}
+		/* If soft reset failed, fall through to USB_RESET */
+		if (adev->recovery.level != AIC_RECOVERY_USB_RESET)
+			break;
+		/* fallthrough */
+	case AIC_RECOVERY_USB_RESET:
 
 	case AIC_RECOVERY_USB_RESET:
 		/* USB device reset */
@@ -384,7 +392,6 @@ void aic_health_check_work(struct work_struct *work)
 	struct delayed_work *dwork = to_delayed_work(work);
 	struct aic_dev *adev = container_of(dwork, struct aic_dev,
 					    health_check_work);
-	static int heartbeat_miss_count = 0;
 
 	if (adev->removing)
 		return;
@@ -392,21 +399,22 @@ void aic_health_check_work(struct work_struct *work)
 	/* Check firmware heartbeat */
 	if (aic_state_is_online(adev->state)) {
 		if (aic_fw_check_heartbeat(adev)) {
-			heartbeat_miss_count = 0;
+			adev->recovery.heartbeat_miss_count = 0;
 		} else {
-			heartbeat_miss_count++;
+			adev->recovery.heartbeat_miss_count++;
 			aic_warn(adev, "heartbeat missed %d/%d\n",
-				 heartbeat_miss_count,
+				 adev->recovery.heartbeat_miss_count,
 				 AIC_HEARTBEAT_MAX_MISS);
 
-			if (heartbeat_miss_count >= AIC_HEARTBEAT_MAX_MISS) {
+			if (adev->recovery.heartbeat_miss_count >=
+			    AIC_HEARTBEAT_MAX_MISS) {
 				aic_err(adev, "firmware heartbeat lost — "
 					"scheduling recovery\n");
 				aic_stats_inc(&adev->stats.fw_heartbeat_timeout);
 				aic_recovery_schedule(adev,
 					AIC_RECOVERY_FW_SOFT_RESET,
 					AIC_RECOVERY_REASON_FW_HEARTBEAT);
-				heartbeat_miss_count = 0;
+				adev->recovery.heartbeat_miss_count = 0;
 			}
 		}
 	}
