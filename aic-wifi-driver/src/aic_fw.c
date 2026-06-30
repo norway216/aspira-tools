@@ -365,8 +365,9 @@ int aic_fw_load_all(struct aic_dev *adev)
 		goto err_release;
 	}
 
-	adev->fw.loaded = true;
-	adev->fw_ready = true;
+	/* Use WRITE_ONCE for cross-CPU visibility */
+	WRITE_ONCE(adev->fw.loaded, true);
+	WRITE_ONCE(adev->fw_ready, true);
 
 	aic_info(adev, "firmware loaded successfully: ver=%s\n",
 		 adev->fw.fw_version);
@@ -450,11 +451,15 @@ int aic_fw_download_and_boot(struct aic_dev *adev)
 		return ret;
 	}
 
-	adev->fw.fw_crc = crc32(0, adev->fw.fw_wifi->data,
-				adev->fw.fw_wifi->size);
-
-	aic_info(adev, "firmware download complete, CRC=0x%08x\n",
-		 adev->fw.fw_crc);
+	if (adev->fw.fw_wifi && adev->fw.fw_wifi->data) {
+		adev->fw.fw_crc = crc32(0, adev->fw.fw_wifi->data,
+					adev->fw.fw_wifi->size);
+		aic_info(adev, "firmware download complete, CRC=0x%08x\n",
+			 adev->fw.fw_crc);
+	} else {
+		adev->fw.fw_crc = 0;
+		aic_info(adev, "firmware download complete\n");
+	}
 
 	return 0;
 }
@@ -468,7 +473,7 @@ int aic_fw_wait_ready(struct aic_dev *adev, unsigned long timeout_ms)
 	unsigned long deadline = jiffies + msecs_to_jiffies(timeout_ms);
 
 	while (time_before(jiffies, deadline)) {
-		if (adev->fw.loaded && adev->fw_ready)
+		if (READ_ONCE(adev->fw.loaded) && READ_ONCE(adev->fw_ready))
 			return 0;
 		if (adev->removing)
 			return -ENODEV;
@@ -501,8 +506,8 @@ void aic_fw_release_all(struct aic_dev *adev)
 		adev->fw.fw_cali = NULL;
 	}
 
-	adev->fw.loaded = false;
-	adev->fw_ready = false;
+	WRITE_ONCE(adev->fw.loaded, false);
+	WRITE_ONCE(adev->fw_ready, false);
 }
 
 /* ================================================================== */

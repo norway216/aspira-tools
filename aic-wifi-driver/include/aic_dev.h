@@ -172,6 +172,9 @@ struct aic_dev {
 	u16                      aid;
 	u32                      cipher_suite;
 
+	/* Per-device net_device_stats (SMP-safe, not static) */
+	struct net_device_stats  netdev_stats;
+
 	/* debugfs root */
 	struct dentry           *debugfs_root;
 

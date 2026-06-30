@@ -111,20 +111,20 @@ static int aic_netdev_set_mac(struct net_device *ndev, void *addr)
 
 static struct net_device_stats *aic_netdev_get_stats(struct net_device *ndev)
 {
-	struct aic_dev *adev = netdev_priv(ndev);
-	static struct net_device_stats stats;
+	struct aic_dev **pp = netdev_priv(ndev);
+	struct aic_dev *adev = *pp;
 
-	memset(&stats, 0, sizeof(stats));
-	stats.tx_packets = atomic64_read(&adev->stats.tx_packets);
-	stats.tx_bytes   = atomic64_read(&adev->stats.tx_bytes);
-	stats.tx_errors  = atomic64_read(&adev->stats.tx_errors);
-	stats.tx_dropped = atomic64_read(&adev->stats.tx_dropped);
-	stats.rx_packets = atomic64_read(&adev->stats.rx_packets);
-	stats.rx_bytes   = atomic64_read(&adev->stats.rx_bytes);
-	stats.rx_errors  = atomic64_read(&adev->stats.rx_errors);
-	stats.rx_dropped = atomic64_read(&adev->stats.rx_dropped);
+	memset(&adev->netdev_stats, 0, sizeof(adev->netdev_stats));
+	adev->netdev_stats.tx_packets = atomic64_read(&adev->stats.tx_packets);
+	adev->netdev_stats.tx_bytes   = atomic64_read(&adev->stats.tx_bytes);
+	adev->netdev_stats.tx_errors  = atomic64_read(&adev->stats.tx_errors);
+	adev->netdev_stats.tx_dropped = atomic64_read(&adev->stats.tx_dropped);
+	adev->netdev_stats.rx_packets = atomic64_read(&adev->stats.rx_packets);
+	adev->netdev_stats.rx_bytes   = atomic64_read(&adev->stats.rx_bytes);
+	adev->netdev_stats.rx_errors  = atomic64_read(&adev->stats.rx_errors);
+	adev->netdev_stats.rx_dropped = atomic64_read(&adev->stats.rx_dropped);
 
-	return &stats;
+	return &adev->netdev_stats;
 }
 
 /* ================================================================== */

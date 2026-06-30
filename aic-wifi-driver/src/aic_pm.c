@@ -122,6 +122,9 @@ int aic_pm_resume(struct aic_dev *adev)
 	if (!aic_fw_check_heartbeat(adev)) {
 		aic_warn(adev, "firmware not responding after resume — "
 			 "triggering recovery\n");
+		/* Release autopm reference before scheduling recovery */
+		if (adev->udev)
+			usb_autopm_put_interface(adev->intf);
 		aic_recovery_schedule(adev, AIC_RECOVERY_FW_SOFT_RESET,
 				      AIC_RECOVERY_REASON_FW_HEARTBEAT);
 		mutex_unlock(&adev->op_mutex);
@@ -138,6 +141,10 @@ int aic_pm_resume(struct aic_dev *adev)
 	/* Wake TX queue */
 	if (adev->ndev)
 		netif_wake_queue(adev->ndev);
+
+	/* Release autopm reference acquired above */
+	if (adev->udev)
+		usb_autopm_put_interface(adev->intf);
 
 	/* Mark PM active */
 	adev->pm.state = AIC_PM_ACTIVE;

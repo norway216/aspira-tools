@@ -141,22 +141,8 @@ void aic_event_work(struct work_struct *work)
 }
 
 /* ================================================================== */
-/* Event Dispatch Table                                                 */
+/* Event Dispatch                                                       */
 /* ================================================================== */
-
-typedef int (*event_handler_t)(struct aic_dev *adev,
-			       const u8 *payload, u16 len);
-
-static const event_handler_t event_handlers[] = {
-	[0x0001] = (event_handler_t)NULL,  /* FW_READY — handled in probe */
-	[0x0010] = (event_handler_t)NULL,  /* SCAN_RESULT */
-	[0x0011] = (event_handler_t)NULL,  /* SCAN_COMPLETE */
-	[0x0020] = (event_handler_t)NULL,  /* CONNECT_RESULT */
-	[0x0021] = (event_handler_t)NULL,  /* DISCONNECT */
-	[0x00F0] = (event_handler_t)NULL,  /* HEARTBEAT */
-	[0x00FE] = (event_handler_t)NULL,  /* FW_ERROR */
-	[0x00FF] = (event_handler_t)NULL,  /* FW_CRASH */
-};
 
 int aic_event_dispatch(struct aic_dev *adev,
 		       const struct aic_event_entry *entry)
@@ -200,8 +186,8 @@ int aic_event_handle_fw_ready(struct aic_dev *adev,
 			      const u8 *payload, u16 len)
 {
 	aic_info(adev, "firmware ready event received\n");
-	adev->fw.loaded = true;
-	adev->fw_ready = true;
+	WRITE_ONCE(adev->fw.loaded, true);
+	WRITE_ONCE(adev->fw_ready, true);
 
 	/* Transition state if still in FW_LOADING */
 	if (adev->state == AIC_STATE_FW_LOADING)
@@ -240,6 +226,9 @@ int aic_event_handle_scan_complete(struct aic_dev *adev,
 
 	aic_dbg(adev, "scan complete\n");
 
+	if (!adev->wiphy)
+		return -ENODEV;
+
 	priv = wiphy_priv(adev->wiphy);
 
 	if (adev->state == AIC_STATE_SCANNING)
@@ -267,6 +256,9 @@ int aic_event_handle_connect_result(struct aic_dev *adev,
 	u16 status = 0;
 
 	aic_dbg(adev, "connect result: %u bytes\n", len);
+
+	if (!adev->wiphy)
+		return -ENODEV;
 
 	priv = wiphy_priv(adev->wiphy);
 
