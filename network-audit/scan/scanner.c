@@ -1,31 +1,13 @@
 /*
  * scanner.c — TCP Connect Scan Engine with Target Queue
  *
- * Non-blocking TCP connect state machine driven by epoll events:
+ * Non-blocking TCP connect state machine driven by epoll events.
+ * States: INIT → CONNECTING → OPEN/CLOSED/TIMEOUT/ERROR
  *
- *   socket() + connect() [non-blocking]
- *     │
- *     ▼
- *   INIT ──────────────────────────────► CONNECTING
- *                                            │
- *                     ┌──────────────────────┼──────────────────────┐
- *                     │ EPOLLERR/EPOLLHUP    │ EPOLLOUT             │ timer fires
- *                     ▼                      ▼                      ▼
- *                   ERROR ─► CLOSED        OPEN ─► CLOSED        TIMEOUT ─► CLOSED
- *                                            │
- *                                     [read banner + fp_match()]
- *                                            │
- *                                            ▼
- *                                   push result → ring_queue
- *                                   close fd → fd_mgr_release
- *                                   drain target queue → submit next
- *
- * Target Queue:
- *   All targets from scanner_submit_targets() are stored in a queue.
- *   The scanner drains the queue up to the concurrency limit. When a
- *   scan completes and a slot frees up, the next target is dequeued
- *   and started. This continues until the queue is empty AND all
- *   in-flight scans have completed — then the reactor is stopped.
+ * Target Queue: all targets enqueued on submission, drained up to
+ * concurrency limit.  When a scan completes (or fails immediately),
+ * the queue is drained again.  Reactor stops when queue empty and
+ * no scans pending.
  */
 
 #include "scanner.h"
@@ -36,24 +18,22 @@
 #include "../result/queue.h"
 #include <stdlib.h>
 
-/* ============================================================
- *  Internal globals (one scanner instance per process)
- * ============================================================ */
+/* ---- Internal globals ---- */
 
-static reactor_t      *g_reactor        = NULL;
-static ring_queue_t   *g_queue          = NULL;
-static scan_callback_t g_callback       = NULL;
-static void           *g_cb_ctx         = NULL;
-static int             g_pending        = 0;
-static int             g_timeout_ticks  = 0;
+static reactor_t      *g_reactor         = NULL;
+static ring_queue_t   *g_queue           = NULL;
+static scan_callback_t g_callback        = NULL;
+static void           *g_cb_ctx          = NULL;
+static int             g_pending         = 0;
+static int             g_timeout_ms      = 0;
 
-/* Target queue */
-static scan_target_t  *g_targets        = NULL;
-static int             g_target_head    = 0;    /* next to dequeue */
-static int             g_target_tail    = 0;    /* next write slot */
+static scan_target_t  *g_targets         = NULL;
+static int             g_target_head     = 0;
+static int             g_target_tail     = 0;
 static int             g_target_capacity = 0;
-static int             g_total_submitted = 0;
 static int             g_total_completed = 0;
+
+#define READ_TIMEOUT_MS 2000
 
 /* ============================================================
  *  Lifecycle
@@ -68,17 +48,14 @@ scanner_init(reactor_t *r, ring_queue_t *queue,
     g_callback  = cb;
     g_cb_ctx    = ctx;
     g_pending   = 0;
-    g_timeout_ticks = 0;
+    g_timeout_ms = 0;
 
-    /* Allocate target queue (capacity = max targets) */
-    int cap = NA_MAX_TARGETS;
-    g_targets = (scan_target_t *)calloc((size_t)cap, sizeof(scan_target_t));
+    g_targets = (scan_target_t *)calloc((size_t)NA_MAX_TARGETS,
+                                        sizeof(scan_target_t));
     if (!g_targets) return -1;
-    g_target_capacity = cap;
+    g_target_capacity = NA_MAX_TARGETS;
     g_target_head = 0;
     g_target_tail = 0;
-    g_total_submitted = 0;
-    g_total_completed = 0;
 
     return 0;
 }
@@ -93,94 +70,94 @@ scanner_cleanup(void)
     g_callback    = NULL;
     g_cb_ctx      = NULL;
     g_pending     = 0;
-    g_target_capacity = 0;
 }
 
 /* ============================================================
- *  Target queue helpers (simple ring buffer)
+ *  Target queue helpers
  * ============================================================ */
 
-static int
-target_queue_empty(void)
-{
+static int tq_empty(void) {
     return g_target_head == g_target_tail;
 }
-
-static int
-target_queue_full(void)
-{
+static int tq_full(void) {
     return ((g_target_tail + 1) % g_target_capacity) == g_target_head;
 }
-
-static int
-target_enqueue(const scan_target_t *t)
-{
-    if (target_queue_full()) return -1;
+static int tq_enq(const scan_target_t *t) {
+    if (tq_full()) return -1;
     g_targets[g_target_tail] = *t;
     g_target_tail = (g_target_tail + 1) % g_target_capacity;
     return 0;
 }
-
-static int
-target_dequeue(scan_target_t *t)
-{
-    if (target_queue_empty()) return -1;
+static int tq_deq(scan_target_t *t) {
+    if (tq_empty()) return -1;
     *t = g_targets[g_target_head];
     g_target_head = (g_target_head + 1) % g_target_capacity;
     return 0;
 }
 
-/* ============================================================
- *  Start a single scan for one target
- *  Returns 0 on success, -1 if at concurrency limit, -2 on error
- * ============================================================ */
+static int timeout_ticks(void) {
+    int ms = (g_timeout_ms > 0) ? g_timeout_ms : NA_TIMEOUT_DEF_MS;
+    return na_ms_to_ticks(ms);
+}
 
+/* ============================================================
+ *  Emit a result directly (used when connect fails immediately)
+ * ============================================================ */
+static void
+emit_result(const scan_target_t *target, sk_state_t state)
+{
+    scan_result_t r;
+    memset(&r, 0, sizeof(r));
+    r.target       = *target;
+    r.state        = state;
+    r.rtt_ms       = 0;
+    r.timestamp_ms = na_now_ms();
+    snprintf(r.service, sizeof(r.service), "unknown");
+
+    if (g_queue)    ring_push(g_queue, &r);
+    if (g_callback) g_callback(&r, g_cb_ctx);
+    g_total_completed++;
+}
+
+/* ============================================================
+ *  Start one scan.  Returns 0 on success (including immediate
+ *  failure), -1 if at concurrency limit.
+ * ============================================================ */
 static int
 scanner_start_one(const scan_target_t *target)
 {
     fd_manager_t *fdm = reactor_get_fd_mgr(g_reactor);
 
-    /* Check FD capacity */
-    if (fd_mgr_acquire(fdm) < 0) {
+    if (fd_mgr_acquire(fdm) < 0)
         return -1;
-    }
 
-    /* Allocate socket entry */
     socket_entry_t *se = reactor_socket_alloc(g_reactor);
     if (!se) {
         fd_mgr_release(fdm);
         return -1;
     }
 
-    /* Create non-blocking socket */
     int fd;
     if (sk_create(&fd) < 0) {
         reactor_socket_free_entry(g_reactor, se);
         fd_mgr_release(fdm);
-        return -2;
+        emit_result(target, SK_ERROR);
+        return 0;
     }
 
-    /* Set TCP_NODELAY for low-latency banner reads */
-    sk_set_nodelay(fd);
+    (void)sk_set_nodelay(fd);
 
-    /* Initiate non-blocking connect */
     int ret = sk_connect_nonblock(fd, target->ip, target->port);
     if (ret < 0) {
-        /*
-         * Immediate failure (e.g. ECONNREFUSED on localhost).
-         * Build a result so this port is reported, not silently dropped.
-         * scanner_finalize() handles fd close, epoll cleanup, and fd_mgr release.
-         */
         sk_state_t st = (errno == ECONNREFUSED) ? SK_CLOSED : SK_ERROR;
-        se->fd     = fd;
-        se->state  = st;
-        se->target = *target;
-        se->rtt_ms = 0;
-        scanner_finalize(se, st);
-        return 0;  /* counted as submitted, result emitted */
+        close(fd);
+        reactor_socket_free_entry(g_reactor, se);
+        fd_mgr_release(fdm);
+        emit_result(target, st);
+        return 0;
     }
 
-    /* Populate socket entry */
+    /* Async connect in progress */
     se->fd         = fd;
     se->state      = SK_CONNECTING;
     se->target     = *target;
@@ -190,308 +167,209 @@ scanner_start_one(const scan_target_t *target)
     se->timer_id   = -1;
     se->in_use     = 1;
 
-    /* Register with epoll (waiting for EPOLLOUT) */
     if (reactor_add_fd(g_reactor, fd, EPOLLOUT, se) < 0) {
+        se->fd = -1;
         close(fd);
         reactor_socket_free_entry(g_reactor, se);
         fd_mgr_release(fdm);
-        return -2;
+        emit_result(target, SK_ERROR);
+        return 0;
     }
 
-    /* Add timeout timer */
     timer_wheel_t *tw = reactor_get_timer(g_reactor);
-    int timeout_ticks = na_ms_to_ticks(g_timeout_ticks > 0 ?
-                                       g_timeout_ticks : NA_TIMEOUT_DEF_MS);
-    g_timeout_ticks = timeout_ticks;
-    se->timer_id = tw_add(tw, timeout_ticks, scanner_on_timeout, se);
+    se->timer_id = tw_add(tw, timeout_ticks(), scanner_on_timeout, se);
+    if (se->timer_id < 0) {
+        reactor_del_fd(g_reactor, fd);
+        se->fd = -1;
+        close(fd);
+        reactor_socket_free_entry(g_reactor, se);
+        fd_mgr_release(fdm);
+        emit_result(target, SK_ERROR);
+        return 0;
+    }
 
     g_pending++;
     return 0;
 }
 
 /* ============================================================
- *  Drain target queue — start as many scans as possible
+ *  Drain queue until empty or concurrency saturated
  * ============================================================ */
-
 static void
 scanner_drain_queue(void)
 {
-    while (!target_queue_empty()) {
-        /* Peek at next target (don't dequeue until started) */
-        scan_target_t target = g_targets[g_target_head];
-
-        int rc = scanner_start_one(&target);
-        if (rc == -1) {
-            /* At concurrency limit — stop, will retry when slots free */
-            break;
-        }
-        /* Successfully started (rc == 0) or error (rc == -2).
-         * In both cases, dequeue and move on. */
-        target_dequeue(&target);
-        if (rc == -2) {
-            g_total_completed++;
-        }
+    scan_target_t t;
+    while (!tq_empty()) {
+        t = g_targets[g_target_head];  /* peek */
+        int rc = scanner_start_one(&t);
+        if (rc == -1) break;           /* concurrency saturated */
+        tq_deq(&t);
     }
 }
 
 /* ============================================================
- *  Target submission — enqueue all targets, then drain
+ *  Submit all targets
  * ============================================================ */
-
 int
 scanner_submit_targets(const scan_target_t *targets, int count)
 {
     if (!g_reactor || !g_targets) return -1;
 
-    /* Enqueue all targets */
-    for (int i = 0; i < count; i++) {
-        if (target_enqueue(&targets[i]) < 0) {
-            break;
-        }
-        g_total_submitted++;
-    }
+    for (int i = 0; i < count; i++)
+        tq_enq(&targets[i]);
 
-    /* Drain queue up to concurrency limit */
     scanner_drain_queue();
+    return count;
+}
 
-    return g_total_submitted;
+void
+scanner_set_timeout_ms(int ms)
+{
+    g_timeout_ms = ms;
 }
 
 /* ============================================================
- *  Event handler — called by reactor for every epoll event
+ *  epoll event handler
  * ============================================================ */
-
 void
 scanner_on_event(struct epoll_event *ev, void *ctx)
 {
     (void)ctx;
-
     socket_entry_t *se = (socket_entry_t *)ev->data.ptr;
-    if (!se || !se->in_use) {
-        return;
-    }
+    if (!se || !se->in_use) return;
 
     uint32_t events = ev->events;
 
-    /* Error conditions take priority */
     if (events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
         scanner_on_error(se);
         return;
     }
 
-    /* State-specific handling */
     switch (se->state) {
-    case SK_CONNECTING:
-        if (events & EPOLLOUT) {
-            scanner_on_connect_done(se);
-        }
-        break;
-
-    case SK_OPEN:
-        if (events & EPOLLIN) {
-            scanner_on_readable(se);
-        }
-        break;
-
-    default:
-        break;
+    case SK_CONNECTING: if (events & EPOLLOUT) scanner_on_connect_done(se); break;
+    case SK_OPEN:       if (events & EPOLLIN)  scanner_on_readable(se);   break;
+    default: break;
     }
 }
 
 /* ============================================================
- *  State: CONNECTING → OPEN (or CLOSED on error)
+ *  CONNECTING → OPEN or CLOSED
  * ============================================================ */
-
 void
 scanner_on_connect_done(socket_entry_t *se)
 {
     int err = sk_get_error(se->fd);
 
     if (err == 0) {
-        /* Connection successful */
         timer_wheel_t *tw = reactor_get_timer(g_reactor);
+        if (se->timer_id > 0) { tw_cancel(tw, se->timer_id); se->timer_id = -1; }
 
-        /* Cancel timeout timer */
-        if (se->timer_id > 0) {
-            tw_cancel(tw, se->timer_id);
-            se->timer_id = -1;
-        }
-
-        /* Calculate RTT */
         se->rtt_ms = (int)(tw_current_tick(tw) - se->start_tick) * NA_TICK_MS;
         if (se->rtt_ms < 0) se->rtt_ms = 0;
-
-        /* Transition to OPEN */
         se->state = SK_OPEN;
 
-        /* Switch epoll to wait for readable data (banner) */
-        reactor_mod_fd(g_reactor, se->fd, EPOLLIN, se);
+        if (reactor_mod_fd(g_reactor, se->fd, EPOLLIN, se) < 0) {
+            scanner_finalize(se, SK_OPEN);
+            return;
+        }
 
-        /* Add read timeout: 2 seconds to receive banner */
-        timer_wheel_t *tw2 = reactor_get_timer(g_reactor);
-        se->timer_id = tw_add(tw2, na_ms_to_ticks(2000), scanner_on_timeout, se);
+        se->timer_id = tw_add(tw, na_ms_to_ticks(READ_TIMEOUT_MS), scanner_on_timeout, se);
+        if (se->timer_id < 0) { scanner_finalize(se, SK_OPEN); return; }
     } else {
-        /* Connection failed */
         scanner_finalize(se, SK_CLOSED);
     }
 }
 
 /* ============================================================
- *  State: OPEN → banner read → fingerprint match → CLOSED
+ *  OPEN → read banner → fingerprint → CLOSED
  * ============================================================ */
-
 void
 scanner_on_readable(socket_entry_t *se)
 {
-    char *buf = se->banner + se->banner_len;
-    int   remaining = (int)sizeof(se->banner) - se->banner_len - 1;
-
-    if (remaining <= 0) {
+    size_t rem = sizeof(se->banner) - (size_t)se->banner_len - 1;
+    if (rem == 0 || se->banner_len >= (int)sizeof(se->banner) - 1) {
         scanner_finalize(se, SK_OPEN);
         return;
     }
 
-    int n = sk_read(se->fd, buf, (size_t)remaining);
-
+    int n = sk_read(se->fd, se->banner + se->banner_len, rem);
     if (n > 0) {
         se->banner_len += n;
         se->banner[se->banner_len] = '\0';
-
-        /* Try fingerprint match */
-        fp_service_t svc = fp_match(se->banner, se->banner_len);
-        if (svc != FP_UNKNOWN) {
+        if (fp_match(&g_fp_db, se->banner, se->banner_len) != FP_UNKNOWN
+            || se->banner_len >= 64)
             scanner_finalize(se, SK_OPEN);
-            return;
-        }
-
-        /* Enough data without a match — close anyway */
-        if (se->banner_len >= 64) {
-            scanner_finalize(se, SK_OPEN);
-        }
     } else if (n == 0) {
-        /* EOF (peer closed) */
         scanner_finalize(se, SK_OPEN);
     }
-    /* n < 0 with EAGAIN: wait for next epoll event */
 }
 
 /* ============================================================
- *  Timeout callback (fired by timer wheel)
+ *  Timeout callback
  * ============================================================ */
-
 void
 scanner_on_timeout(void *arg)
 {
     socket_entry_t *se = (socket_entry_t *)arg;
-
     if (!se || !se->in_use) return;
-
     se->timer_id = -1;
-
-    if (se->state == SK_CONNECTING) {
-        scanner_finalize(se, SK_TIMEOUT);
-    } else if (se->state == SK_OPEN) {
-        scanner_finalize(se, SK_OPEN);
-    }
+    scanner_finalize(se, se->state == SK_CONNECTING ? SK_TIMEOUT : SK_OPEN);
 }
 
 /* ============================================================
- *  Error handling
+ *  Error — check SO_ERROR
  * ============================================================ */
-
 void
 scanner_on_error(socket_entry_t *se)
 {
-    /*
-     * EPOLLERR fires for various reasons. Check SO_ERROR to distinguish:
-     *   ECONNREFUSED → port is actively closed (CLOSED)
-     *   other        → genuine error (ERROR)
-     */
     int err = sk_get_error(se->fd);
-    sk_state_t final_state = (err == ECONNREFUSED) ? SK_CLOSED : SK_ERROR;
-    scanner_finalize(se, final_state);
+    scanner_finalize(se, (err == ECONNREFUSED) ? SK_CLOSED : SK_ERROR);
 }
 
 /* ============================================================
- *  Finalize: push result, close fd, release resources,
- *            drain target queue to refill slot
+ *  Finalize: push result, close, release, refill queue
  * ============================================================ */
-
 void
 scanner_finalize(socket_entry_t *se, sk_state_t final_state)
 {
     if (!se || !se->in_use) return;
-
     se->state = final_state;
 
-    /* Cancel any pending timer */
     if (se->timer_id > 0) {
         tw_cancel(reactor_get_timer(g_reactor), se->timer_id);
         se->timer_id = -1;
     }
+    if (se->fd >= 0) reactor_del_fd(g_reactor, se->fd);
 
-    /* Remove from epoll */
-    if (se->fd >= 0) {
-        reactor_del_fd(g_reactor, se->fd);
-    }
-
-    /* Build result */
-    scan_result_t result;
-    memset(&result, 0, sizeof(result));
-    result.target       = se->target;
-    result.state        = se->state;
-    result.rtt_ms       = se->rtt_ms;
-    result.timestamp_ms = na_now_ms();
+    scan_result_t r;
+    memset(&r, 0, sizeof(r));
+    r.target       = se->target;
+    r.state        = se->state;
+    r.rtt_ms       = se->rtt_ms;
+    r.timestamp_ms = na_now_ms();
 
     if (se->banner_len > 0) {
-        fp_service_t svc = fp_match(se->banner, se->banner_len);
-        strncpy(result.service, fp_service_name(svc), sizeof(result.service) - 1);
-        strncpy(result.banner, se->banner, sizeof(result.banner) - 1);
+        fp_service_t svc = fp_match(&g_fp_db, se->banner, se->banner_len);
+        snprintf(r.service, sizeof(r.service), "%s", fp_service_name(svc));
+        snprintf(r.banner, sizeof(r.banner), "%s", se->banner);
     } else {
-        strncpy(result.service, "unknown", sizeof(result.service) - 1);
+        snprintf(r.service, sizeof(r.service), "unknown");
     }
 
-    /* Push to ring buffer */
-    if (g_queue) {
-        ring_push(g_queue, &result);
-    }
+    if (g_queue)    ring_push(g_queue, &r);
+    if (g_callback) g_callback(&r, g_cb_ctx);
 
-    /* Invoke callback */
-    if (g_callback) {
-        g_callback(&result, g_cb_ctx);
-    }
+    if (se->fd >= 0) { close(se->fd); se->fd = -1; }
 
-    /* Close socket */
-    if (se->fd >= 0) {
-        close(se->fd);
-        se->fd = -1;
-    }
-
-    /* Release FD slot */
+    /* Return slot to free-list so it can be reused */
+    reactor_socket_free_entry(g_reactor, se);
     fd_mgr_release(reactor_get_fd_mgr(g_reactor));
-
-    /* Mark slot free */
-    se->in_use = 0;
     g_pending--;
-    g_total_completed++;
 
-    /*
-     * Refill: drain the target queue to start new scans in the
-     * freed slot. Then check if we're completely done.
-     */
     scanner_drain_queue();
 
-    if (g_pending <= 0 && target_queue_empty() && g_reactor) {
+    if (g_pending <= 0 && tq_empty() && g_reactor)
         reactor_stop(g_reactor);
-    }
 }
 
-/* ============================================================
- *  Status
- * ============================================================ */
-
-int
-scanner_pending(void)
-{
-    return g_pending;
-}
+int scanner_pending(void) { return g_pending; }

@@ -26,6 +26,7 @@
 #include <netinet/tcp.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -64,8 +65,6 @@
 #define NA_FP_PATTERNS_MAX   64
 #define NA_JSON_BUF_SIZE     4096
 #define NA_ADDR_STR_LEN      256
-#define NA_TMR_POOL_SIZE     NA_CONCURRENCY_MAX
-
 /* ============================================================
  *  Socket / Connection State Machine
  * ============================================================ */
@@ -122,7 +121,6 @@ struct timer_node;                      /* forward decl for typedef   */
 typedef void (*timer_cb_t)(void *arg);
 
 typedef struct timer_node {
-    int            expire_tick;         /* absolute tick when fires   */
     int            remaining_ticks;     /* for multi-wrap support     */
     timer_cb_t     callback;
     void          *arg;
@@ -164,15 +162,15 @@ typedef struct {
  * ============================================================ */
 
 typedef struct {
+    int64_t        start_tick;          /* 8 bytes, largest first      */
     int            fd;                  /* socket file descriptor      */
-    sk_state_t     state;               /* current state machine state */
-    scan_target_t  target;              /* 6 bytes                     */
-    int64_t        start_tick;          /* timer tick at connect()     */
     int            rtt_ms;              /* -1 = not measured           */
-    char           banner[NA_BANNER_LEN]; /* read buffer + null term   */
     int            banner_len;          /* bytes read so far           */
     int            timer_id;            /* -1 = no active timer        */
     int            in_use;              /* 0 = free, 1 = occupied      */
+    sk_state_t     state;               /* current state machine state */
+    scan_target_t  target;              /* 6 bytes packed              */
+    char           banner[NA_BANNER_LEN]; /* read buffer + null term   */
 } socket_entry_t;
 
 /* ============================================================
@@ -187,6 +185,8 @@ typedef struct {
     fd_manager_t    fd_mgr;
     timer_wheel_t   timer;
     socket_entry_t *sockets;            /* array [socket_capacity]     */
+    int            *free_list;          /* O(1) free-slot stack        */
+    int             free_top;           /* stack pointer               */
     int             socket_capacity;
 } reactor_t;
 
@@ -299,10 +299,10 @@ typedef struct {
 } na_config_t;
 
 /* ============================================================
- *  Global shutdown flag (set by signal handlers)
+ *  Global shutdown flag (set by signal handlers, C11 atomic)
  * ============================================================ */
 
-extern volatile int g_shutdown;
+extern atomic_int g_shutdown;
 
 /* ============================================================
  *  Inline helpers

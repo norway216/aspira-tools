@@ -6,10 +6,9 @@
  * (N ≈ banner_len ≤ 128, M = pattern count ≤ 64).
  *
  * Matching strategy:
- *   - Patterns are checked in registration order (most-specific first).
- *   - First match wins — no ambiguity resolution.
+ *   - Patterns are checked in registration order (first match wins).
  *   - TLS record headers (0x16 0x03) are matched as raw bytes.
- *   - HTTP and HTTPS are distinguished by port context (caller's job).
+ *   - TCP port context for TLS vs HTTPS is left to the caller.
  */
 
 #include "fingerprint.h"
@@ -26,46 +25,19 @@ fp_init_default(fp_db_t *db)
 {
     memset(db, 0, sizeof(*db));
 
-    /*
-     * Registration order matters: first match wins. Place more
-     * specific patterns before general ones.
-     */
+    /* Registration order: more specific patterns first */
 
-    /* SSH: banners always start with "SSH-" */
-    fp_register_pattern(db, "SSH-", FP_SSH, "SSH");
-
-    /* HTTP: response starts with "HTTP/" */
-    fp_register_pattern(db, "HTTP/", FP_HTTP, "HTTP");
-
-    /* TLS: first bytes are 0x16 0x03 (TLS record layer) */
-    fp_register_pattern(db, "\x16\x03", FP_TLS, "TLS");
-
-    /* SMTP: greeting starts with "220" and contains "SMTP" or "ESMTP" */
-    fp_register_pattern(db, "220", FP_SMTP, "SMTP");
-
-    /* FTP: similar 220 greeting */
-    fp_register_pattern(db, "FTP", FP_FTP, "FTP");
-
-    /* MySQL: server greeting contains version string */
-    fp_register_pattern(db, "mysql", FP_MYSQL, "MySQL");
-
-    /* RDP: TPKT header starts with 0x03 0x00 */
-    fp_register_pattern(db, "\x03\x00", FP_RDP, "RDP");
-
-    /* DNS: not typically TCP, but some DNS-over-TCP services exist */
-    /* (skip; DNS is primarily UDP) */
-
-    /* Telnet: IAC sequence or login prompt */
-    fp_register_pattern(db, "login:", FP_TELNET, "Telnet");
-
-    /* RTSP: "RTSP/" */
-    fp_register_pattern(db, "RTSP/", FP_RTSP, "RTSP");
-
-    /* IMAP: "* OK" greeting */
-    fp_register_pattern(db, "* OK", FP_IMAP, "IMAP");
-
-    /* POP3: "+OK" greeting */
-    fp_register_pattern(db, "+OK", FP_POP3, "POP3");
+    fp_register_pattern(db, "SSH-",            FP_SSH,    "SSH");
+    fp_register_pattern(db, "HTTP/",           FP_HTTP,   "HTTP");
+    fp_register_pattern(db, "\x16\x03",        FP_TLS,    "TLS");
+    fp_register_pattern(db, "220",             FP_SMTP,   "SMTP");
+    fp_register_pattern(db, "FTP",             FP_FTP,    "FTP");
+    fp_register_pattern(db, "mysql",           FP_MYSQL,  "MySQL");
+    fp_register_pattern(db, "\x03\x00",        FP_RDP,    "RDP");
+    fp_register_pattern(db, "login:",          FP_TELNET, "Telnet");
+    fp_register_pattern(db, "RTSP/",           FP_RTSP,   "RTSP");
+    fp_register_pattern(db, "* OK",            FP_IMAP,   "IMAP");
+    fp_register_pattern(db, "+OK",             FP_POP3,   "POP3");
 }
 
 /* ============================================================
@@ -91,21 +63,22 @@ fp_register_pattern(fp_db_t *db, const char *pattern,
 }
 
 /* ============================================================
- *  Match a banner against the fingerprint database
+ *  Match a banner against the fingerprint database (Fix #16:
+ *  takes explicit db parameter instead of using global)
  * ============================================================ */
 
 fp_service_t
-fp_match(const char *banner, int banner_len)
+fp_match(const fp_db_t *db, const char *banner, int banner_len)
 {
-    if (!banner || banner_len <= 0) {
+    if (!db || !banner || banner_len <= 0) {
         return FP_UNKNOWN;
     }
 
-    for (int i = 0; i < g_fp_db.count; i++) {
-        const fp_entry_t *entry = &g_fp_db.entries[i];
+    for (int i = 0; i < db->count; i++) {
+        const fp_entry_t *entry = &db->entries[i];
 
         if (banner_len < entry->min_match_len) {
-            continue;                  /* not enough data yet */
+            continue;
         }
 
         if (strstr(banner, entry->pattern)) {
@@ -117,18 +90,13 @@ fp_match(const char *banner, int banner_len)
 }
 
 /* ============================================================
- *  Human-readable service name
+ *  Human-readable service name (Fix #15: single switch, no
+ *  redundant DB scan)
  * ============================================================ */
 
 const char *
 fp_service_name(fp_service_t s)
 {
-    for (int i = 0; i < g_fp_db.count; i++) {
-        if (g_fp_db.entries[i].service == s) {
-            return g_fp_db.entries[i].service_name;
-        }
-    }
-
     switch (s) {
     case FP_UNKNOWN: return "unknown";
     case FP_SSH:     return "SSH";
