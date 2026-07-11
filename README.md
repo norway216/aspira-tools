@@ -27,8 +27,16 @@ aspira-tools/
 │   ├── docs/              # Design documentation
 │   ├── build.sh           # Build & test script
 │   └── Makefile           # Makefile build configuration
-├── .gitignore             # Git ignore rules
-└── README.md              # This file
+├── system-recovery/        # Embedded system recovery/install GUI
+│   ├── src/                # Source code (core, UI, services, HAL)
+│   ├── lvgl/               # LVGL graphics library
+│   ├── lv_drivers/         # Display/input driver adapters
+│   ├── config/             # Default runtime configuration
+│   ├── docs/               # Architecture & test reports
+│   ├── tests/              # Unit, integration, system tests
+│   └── Makefile            # Makefile build configuration
+├── .gitignore              # Git ignore rules
+└── README.md               # This file
 ```
 
 ## Projects
@@ -44,6 +52,12 @@ For detailed documentation, see [disk-checker/README.md](disk-checker/README.md)
 An ultra-low-memory (<20MB), high-concurrency (10k+ connections) TCP network audit framework built on epoll. Features non-blocking connect scanning with a 5-state machine, O(1) timer wheel, lock-free result pipeline, banner fingerprinting (SSH, HTTP, TLS, SMTP, FTP, MySQL, RDP, etc.), and optional SQLite3 persistence. Designed for internal lab network auditing with strict security constraints (no brute force, no exploitation).
 
 For detailed documentation, see [network-audit/docs/lightweight_network_audit_framework_v1.md](network-audit/docs/lightweight_network_audit_framework_v1.md).
+
+### system-recovery — Embedded System Recovery / Installation GUI
+
+A modular, maintainable replacement for the legacy lvglsysrecovery application. Provides system recovery, system installation, and software backup/restore via an LVGL-based graphical interface on ARM64 embedded platforms. Features a layered architecture (Application → Service → HAL), pluggable operation modules, multi-display driver support (fbdev, DRM, ILI9341, etc.), and multi-input device support (evdev, touchpad, keyboard).
+
+For detailed documentation, see [system-recovery/docs/architecture-design.md](system-recovery/docs/architecture-design.md).
 
 ### Quick Build
 
@@ -61,6 +75,15 @@ cd network-audit
 ./build.sh release      # Optimized release build
 ./build.sh smoke        # Build + localhost smoke test
 ./build.sh all          # Full pipeline: clean + debug + release + size + check
+```
+
+**system-recovery:**
+```bash
+cd system-recovery
+make NATIVE=1             # Native build for testing
+make NATIVE=1 test        # Build and run test suite
+make CC=aarch64-linux-gnu-gcc  # Cross-compile for ARM64 target
+make install DESTDIR=/path/to/rootfs  # Install to target rootfs
 ```
 
 ## Requirements
