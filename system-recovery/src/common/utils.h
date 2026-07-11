@@ -19,6 +19,13 @@ void utils_sleep_ms(uint32_t ms);
 /** Execute a shell command and return its exit code. */
 int utils_shell_exec(const char *cmd);
 
+/** Execute a shell command with timeout (in seconds).
+ *  @param cmd         Shell command to execute.
+ *  @param timeout_sec Maximum wait time; 0 = no timeout.
+ *  @return Exit code on success, -1 on timeout or error.
+ */
+int utils_shell_exec_timeout(const char *cmd, unsigned int timeout_sec);
+
 /** Execute a shell command and capture its stdout (first line only). */
 int utils_shell_capture(const char *cmd, char *output, size_t output_len);
 

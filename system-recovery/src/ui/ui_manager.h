@@ -42,8 +42,9 @@ void ui_manager_navigate(screen_id_t id);
 /** Get the currently active screen ID. */
 screen_id_t ui_manager_current_screen(void);
 
-/** Process one tick of LVGL tasks (~60 Hz). */
-void ui_manager_tick(void);
+/** Process one tick of LVGL tasks.
+ *  @return Milliseconds until the next LVGL timer expires (0 = immediately). */
+uint32_t ui_manager_tick(void);
 
 /** Show a message dialog to the user. */
 void ui_manager_show_message(const char *title, const char *message, bool is_error);

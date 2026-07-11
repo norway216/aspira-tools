@@ -111,9 +111,9 @@ screen_id_t ui_manager_current_screen(void)
     return current_screen;
 }
 
-void ui_manager_tick(void)
+uint32_t ui_manager_tick(void)
 {
-    lv_task_handler();
+    uint32_t delay = lv_task_handler();
     /* Update time display if needed */
     static uint32_t last_time = 0;
     uint32_t now = utils_tick_get();
@@ -121,6 +121,7 @@ void ui_manager_tick(void)
         last_time = now;
         /* Time label update is handled by screen_show on each screen */
     }
+    return delay;
 }
 
 void ui_manager_show_message(const char *title, const char *message, bool is_error)

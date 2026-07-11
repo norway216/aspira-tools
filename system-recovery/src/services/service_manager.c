@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* ---- Mapping: operation_type_t → plugin name -------------------------- */
 
@@ -23,6 +24,8 @@ static const char *plugin_for_type(operation_type_t type)
 
 /* ---- Worker Thread Context -------------------------------------------- */
 
+#define SHUTDOWN_TIMEOUT_SEC 10   /* Max wait for worker thread on shutdown */
+
 typedef struct {
     const operation_plugin_t *plugin;
     progress_callback_t       progress_cb;
@@ -39,13 +42,23 @@ static void *worker_thread_func(void *arg)
 {
     worker_ctx_t *wctx = (worker_ctx_t *)arg;
 
-    operation_result_t result = wctx->plugin->execute(wctx->progress_cb, wctx->ctx);
+    operation_result_t result;
+    memset(&result, 0, sizeof(result));
+    result.error_code = -1;
 
-    if (wctx->complete_cb) {
+    /* If cancelled before execution starts, skip */
+    if (!cancel_requested) {
+        result = wctx->plugin->execute(wctx->progress_cb, wctx->ctx);
+    } else {
+        snprintf(result.message, sizeof(result.message), "Operation cancelled");
+    }
+
+    if (wctx->complete_cb && !cancel_requested) {
         wctx->complete_cb(&result, wctx->ctx);
     }
 
     worker_running = false;
+    free(wctx);
     return NULL;
 }
 
@@ -63,8 +76,20 @@ void service_manager_deinit(void)
 {
     if (worker_running) {
         cancel_requested = true;
-        pthread_join(worker_thread, NULL);
-        worker_running = false;
+
+        /* Wait for worker thread with timeout — don't block shutdown forever */
+        for (int i = 0; i < SHUTDOWN_TIMEOUT_SEC * 10; i++) {
+            if (!worker_running) break;
+            usleep(100000);  /* 100 ms */
+        }
+
+        if (worker_running) {
+            log_service_write(LOG_LEVEL_ERROR,
+                "Worker thread did not finish within %d s — detaching",
+                SHUTDOWN_TIMEOUT_SEC);
+            pthread_detach(worker_thread);
+            worker_running = false;
+        }
     }
     operation_plugin_deregister_all();
 }
@@ -136,4 +161,9 @@ bool service_manager_is_busy(void)
 void service_manager_cancel(void)
 {
     cancel_requested = true;
+}
+
+bool service_manager_cancelled(void)
+{
+    return cancel_requested;
 }

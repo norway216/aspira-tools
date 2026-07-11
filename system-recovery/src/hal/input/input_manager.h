@@ -53,4 +53,12 @@ void input_manager_deinit(void);
 /** Return the build identifier string. */
 const char *input_manager_build_id(void);
 
+/**
+ * Collect active input file descriptors for poll()-based main loop.
+ * @param fds      Caller-supplied array to fill with FDs.
+ * @param max_fds  Maximum size of the array.
+ * @return Number of FDs written (0 if none available).
+ */
+int input_manager_get_poll_fds(int *fds, int max_fds);
+
 #endif /* HAL_INPUT_MANAGER_H */

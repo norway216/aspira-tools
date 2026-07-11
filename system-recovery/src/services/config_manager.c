@@ -17,8 +17,8 @@ static config_entry_t entries[MAX_ENTRIES];
 static int            entry_count = 0;
 
 static const char *config_paths[] = {
-    "/etc/system-recovery/config.ini",
-    "./config/default_config.ini",
+    "./config/default_config.ini",        /* Load defaults first */
+    "/etc/system-recovery/config.ini",    /* Overlay runtime config */
     NULL
 };
 
@@ -94,11 +94,10 @@ bool config_manager_init(void)
 {
     entry_count = 0;
 
-    /* Try each config path */
+    /* Load all config files in order — later files overlay earlier ones */
     for (int i = 0; config_paths[i] != NULL; i++) {
         if (parse_ini_file(config_paths[i])) {
             printf("config: loaded %s (%d entries)\n", config_paths[i], entry_count);
-            break;
         }
     }
 
