@@ -45,7 +45,7 @@ static operation_result_t op_execute(progress_callback_t progress, void *ctx)
     if (progress) progress(5, "Mounting partitions...", NULL);
     if (storage_mount(&recovery_mp) != 0) {
         snprintf(result.message, sizeof(result.message), "Failed to mount recovery partition");
-        return result;
+        goto cleanup;
     }
     if (storage_mount(&data_mp) != 0) {
         snprintf(result.message, sizeof(result.message), "Failed to mount data partition");
@@ -106,16 +106,5 @@ static void op_cleanup(void)
     storage_umount(&data_mp);
 }
 
-__attribute__((constructor))
-static void register_plugin(void)
-{
-    static operation_plugin_t plugin = {
-        .name        = "app_recovery",
-        .description = "Application Software Recovery",
-        .validate    = op_validate,
-        .init        = op_init,
-        .execute     = op_execute,
-        .cleanup     = op_cleanup,
-    };
-    operation_plugin_register(&plugin);
-}
+REGISTER_OPERATION_PLUGIN(app_recovery, "Application Software Recovery",
+                           op_validate, op_init, op_execute, op_cleanup);

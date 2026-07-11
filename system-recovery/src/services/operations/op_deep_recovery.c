@@ -9,7 +9,6 @@
 #include "services/service_manager.h"
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 
 static mount_point_t recovery_mp;
 static mount_point_t data_mp;
@@ -197,12 +196,7 @@ cleanup:
     if (data_mounted)   storage_umount(&data_mp);
     if (root_b_mounted) storage_umount(&root_b_mp);
     if (root_a_mounted) storage_umount(&root_a_mp);
-    if (recovery_mounted) {
-        storage_umount(&recovery_mp);
-        if (!result.success) {
-            /* Ensure recovery partition is cleanly unmounted on failure */
-        }
-    }
+    if (recovery_mounted) storage_umount(&recovery_mp);
 
 #undef CHECK_CANCEL
     return result;
@@ -216,16 +210,5 @@ static void op_cleanup(void)
     storage_umount(&root_b_mp);
 }
 
-__attribute__((constructor))
-static void register_plugin(void)
-{
-    static operation_plugin_t plugin = {
-        .name        = "deep_recovery",
-        .description = "Deep System Recovery (Full Reflash)",
-        .validate    = op_validate,
-        .init        = op_init,
-        .execute     = op_execute,
-        .cleanup     = op_cleanup,
-    };
-    operation_plugin_register(&plugin);
-}
+REGISTER_OPERATION_PLUGIN(deep_recovery, "Deep System Recovery (Full Reflash)",
+                           op_validate, op_init, op_execute, op_cleanup);

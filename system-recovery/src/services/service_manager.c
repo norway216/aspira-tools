@@ -31,7 +31,6 @@ typedef struct {
     progress_callback_t       progress_cb;
     void (*complete_cb)(const operation_result_t *result, void *ctx);
     void                     *ctx;
-    operation_result_t         result;
 } worker_ctx_t;
 
 static pthread_t     worker_thread;

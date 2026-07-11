@@ -11,7 +11,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <unistd.h>
 
 static mount_point_t data_mp;
 
@@ -110,16 +109,5 @@ static void op_cleanup(void)
     storage_umount(&data_mp);
 }
 
-__attribute__((constructor))
-static void register_plugin(void)
-{
-    static operation_plugin_t plugin = {
-        .name        = "light_recovery",
-        .description = "Lightweight System Recovery",
-        .validate    = op_validate,
-        .init        = op_init,
-        .execute     = op_execute,
-        .cleanup     = op_cleanup,
-    };
-    operation_plugin_register(&plugin);
-}
+REGISTER_OPERATION_PLUGIN(light_recovery, "Lightweight System Recovery",
+                           op_validate, op_init, op_execute, op_cleanup);

@@ -76,16 +76,5 @@ static operation_result_t op_execute(progress_callback_t progress, void *ctx)
 
 static void op_cleanup(void) { }
 
-__attribute__((constructor))
-static void register_plugin(void)
-{
-    static operation_plugin_t plugin = {
-        .name        = "light_install",
-        .description = "Lightweight System Installation",
-        .validate    = op_validate,
-        .init        = op_init,
-        .execute     = op_execute,
-        .cleanup     = op_cleanup,
-    };
-    operation_plugin_register(&plugin);
-}
+REGISTER_OPERATION_PLUGIN(light_install, "Lightweight System Installation",
+                           op_validate, op_init, op_execute, op_cleanup);

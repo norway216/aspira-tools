@@ -136,16 +136,5 @@ static void op_cleanup(void)
     storage_umount(&ext_mp);
 }
 
-__attribute__((constructor))
-static void register_plugin(void)
-{
-    static operation_plugin_t plugin = {
-        .name        = "app_backup",
-        .description = "Application Software Backup",
-        .validate    = op_validate,
-        .init        = op_init,
-        .execute     = op_execute,
-        .cleanup     = op_cleanup,
-    };
-    operation_plugin_register(&plugin);
-}
+REGISTER_OPERATION_PLUGIN(app_backup, "Application Software Backup",
+                           op_validate, op_init, op_execute, op_cleanup);

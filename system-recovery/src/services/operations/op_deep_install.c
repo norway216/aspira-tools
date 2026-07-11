@@ -83,6 +83,9 @@ static operation_result_t op_execute(progress_callback_t progress, void *ctx)
         char log_file[64];
         snprintf(log_file, sizeof(log_file), "/tmp/update_step%d.log", i);
 
+        /* Steps 0-1 run before flash_vars.conf is written; last step
+         * is a no-op (func==NULL, broken above). If config is unsafe,
+         * never source it — run all steps without environment. */
         if (i == 0 || i == 1 || i == (TOTAL_STEPS - 1) || !use_vars) {
             snprintf(cmd, sizeof(cmd), "%s %s > %s 2>&1",
                      UPDATE_SCRIPT, steps[i].func, log_file);
@@ -107,16 +110,5 @@ static operation_result_t op_execute(progress_callback_t progress, void *ctx)
 
 static void op_cleanup(void) { }
 
-__attribute__((constructor))
-static void register_plugin(void)
-{
-    static operation_plugin_t plugin = {
-        .name        = "deep_install",
-        .description = "Full System Installation (from USB/SD)",
-        .validate    = op_validate,
-        .init        = op_init,
-        .execute     = op_execute,
-        .cleanup     = op_cleanup,
-    };
-    operation_plugin_register(&plugin);
-}
+REGISTER_OPERATION_PLUGIN(deep_install, "Full System Installation (from USB/SD)",
+                           op_validate, op_init, op_execute, op_cleanup);
