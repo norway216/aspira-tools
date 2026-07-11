@@ -7,6 +7,7 @@
 #include "op_interface.h"
 #include "hal/storage/storage.h"
 #include "common/utils.h"
+#include "services/service_manager.h"
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -61,6 +62,10 @@ static operation_result_t op_execute(progress_callback_t progress, void *ctx)
     }
 
     /* Read local version */
+    if (service_manager_cancelled()) {
+        snprintf(result.message, sizeof(result.message), "Operation cancelled by user");
+        goto cleanup;
+    }
     if (progress) progress(15, "Reading version info...", NULL);
     version_info_t local_info;
     if (storage_read_version("/tmp/sr_data/root-0/upper/usr/tigerapp/res/general",
@@ -70,6 +75,10 @@ static operation_result_t op_execute(progress_callback_t progress, void *ctx)
     }
 
     /* Check external backup exists */
+    if (service_manager_cancelled()) {
+        snprintf(result.message, sizeof(result.message), "Operation cancelled by user");
+        goto cleanup;
+    }
     if (progress) progress(25, "Checking external backup...", NULL);
     char backup_path[512];
     snprintf(backup_path, sizeof(backup_path),
@@ -82,6 +91,10 @@ static operation_result_t op_execute(progress_callback_t progress, void *ctx)
     }
 
     /* Verify backup MD5 */
+    if (service_manager_cancelled()) {
+        snprintf(result.message, sizeof(result.message), "Operation cancelled by user");
+        goto cleanup;
+    }
     if (progress) progress(35, "Verifying backup checksum...", NULL);
     if (!utils_verify_md5(backup_path)) {
         snprintf(result.message, sizeof(result.message),

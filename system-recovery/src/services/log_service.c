@@ -36,14 +36,19 @@ void log_service_write(log_level_t level, const char *format, ...)
     const char *ls = (level >= 0 && level <= LOG_LEVEL_ERROR) ? level_str[level] : "???";
 
     time_t now = time(NULL);
-    struct tm *tm = localtime(&now);
-    char ts[32];
+    struct tm tm_buf;
+    localtime_r(&now, &tm_buf);
+    char ts[64];
     snprintf(ts, sizeof(ts), "%04d-%02d-%02d %02d:%02d:%02d",
-             tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
-             tm->tm_hour, tm->tm_min, tm->tm_sec);
+             tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday,
+             tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
 
     va_list args;
     va_start(args, format);
+
+    /* va_copy BEFORE any consumption — needed for dual output */
+    va_list args_copy;
+    va_copy(args_copy, args);
 
     if (log_fp) {
         fprintf(log_fp, "[%s] [%s] ", ts, ls);
@@ -55,14 +60,11 @@ void log_service_write(log_level_t level, const char *format, ...)
     /* Also echo to stderr for levels >= WARN */
     if (level >= LOG_LEVEL_WARN) {
         fprintf(stderr, "[%s] [%s] ", ts, ls);
-        va_list args2;
-        va_copy(args2, args);
-        /* Note: va_start already consumed; we need a fresh start.
-         * Since we can't easily re-va_start, we echo format only. */
-        fprintf(stderr, "%s\n", format);
-        va_end(args2);
+        vfprintf(stderr, format, args_copy);
+        fprintf(stderr, "\n");
     }
 
+    va_end(args_copy);
     va_end(args);
 }
 

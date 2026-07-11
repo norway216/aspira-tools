@@ -72,11 +72,11 @@ static void on_operation_complete(const operation_result_t *result, void *ctx)
         .int_param = result->success ? 1 : 0,
     };
     strncpy(ev.str_param, result->message, sizeof(ev.str_param) - 1);
+    /* event_bus_publish is mutex-protected — safe from worker thread */
     event_bus_publish(&ev);
 
-    if (result->success) {
-        ui_manager_navigate(SCREEN_NOTIFY);
-    }
+    /* Navigation deferred to main thread via screen_progress_apply_updates()
+     * — do NOT call ui_manager_navigate() here (LVGL is not thread-safe). */
 }
 
 static void progress_handler(int percent, const char *status, void *ctx)

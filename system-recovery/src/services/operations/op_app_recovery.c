@@ -7,6 +7,7 @@
 #include "op_interface.h"
 #include "hal/storage/storage.h"
 #include "common/utils.h"
+#include "services/service_manager.h"
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -42,12 +43,20 @@ static operation_result_t op_execute(progress_callback_t progress, void *ctx)
 
     /* 1. Mount partitions */
     if (progress) progress(5, "Mounting partitions...", NULL);
-    if (storage_mount(&recovery_mp) != 0 || storage_mount(&data_mp) != 0) {
-        snprintf(result.message, sizeof(result.message), "Failed to mount partitions");
+    if (storage_mount(&recovery_mp) != 0) {
+        snprintf(result.message, sizeof(result.message), "Failed to mount recovery partition");
         return result;
+    }
+    if (storage_mount(&data_mp) != 0) {
+        snprintf(result.message, sizeof(result.message), "Failed to mount data partition");
+        goto cleanup;
     }
 
     /* 2. Check backup file exists */
+    if (service_manager_cancelled()) {
+        snprintf(result.message, sizeof(result.message), "Operation cancelled by user");
+        goto cleanup;
+    }
     if (progress) progress(15, "Checking backup file...", NULL);
     if (!utils_file_exists("/tmp/sr_recovery/backup.bin")) {
         snprintf(result.message, sizeof(result.message), "Backup file not found");
@@ -55,6 +64,10 @@ static operation_result_t op_execute(progress_callback_t progress, void *ctx)
     }
 
     /* 3. Verify MD5 */
+    if (service_manager_cancelled()) {
+        snprintf(result.message, sizeof(result.message), "Operation cancelled by user");
+        goto cleanup;
+    }
     if (progress) progress(25, "Verifying backup checksum...", NULL);
     if (!utils_verify_md5("/tmp/sr_recovery/backup.bin")) {
         snprintf(result.message, sizeof(result.message), "Backup MD5 verification failed");

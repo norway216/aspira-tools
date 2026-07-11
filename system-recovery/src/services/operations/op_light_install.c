@@ -5,6 +5,7 @@
 
 #include "op_interface.h"
 #include "common/utils.h"
+#include "services/service_manager.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -47,6 +48,11 @@ static operation_result_t op_execute(progress_callback_t progress, void *ctx)
     int total = (int)(sizeof(steps) / sizeof(steps[0]));
 
     for (int i = 0; i < total; i++) {
+        if (service_manager_cancelled()) {
+            snprintf(result.message, sizeof(result.message), "Operation cancelled by user");
+            return result;
+        }
+
         if (progress) progress(steps[i].pct, steps[i].desc, NULL);
 
         char cmd[512];

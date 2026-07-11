@@ -57,6 +57,11 @@ static void *worker_thread_func(void *arg)
         wctx->complete_cb(&result, wctx->ctx);
     }
 
+    /* Always call cleanup as safety net for any resources from init/execute */
+    if (wctx->plugin->cleanup) {
+        wctx->plugin->cleanup();
+    }
+
     worker_running = false;
     free(wctx);
     return NULL;

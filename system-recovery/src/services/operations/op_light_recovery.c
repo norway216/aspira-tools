@@ -7,6 +7,7 @@
 #include "op_interface.h"
 #include "hal/storage/storage.h"
 #include "common/utils.h"
+#include "services/service_manager.h"
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -36,24 +37,30 @@ static operation_result_t op_execute(progress_callback_t progress, void *ctx)
 {
     (void)ctx;
     operation_result_t result = { .success = false, .error_code = -1 };
+    bool data_mounted = false;
+    char cmd[512];
 
     if (progress) progress(5, "Mounting data partition...", NULL);
 
     if (storage_mount(&data_mp) != 0) {
         snprintf(result.message, sizeof(result.message),
                  "Failed to mount data partition");
-        return result;
+        goto cleanup;
+    }
+    data_mounted = true;
+
+    if (service_manager_cancelled()) {
+        snprintf(result.message, sizeof(result.message), "Operation cancelled by user");
+        goto cleanup;
     }
 
     if (progress) progress(20, "Cleaning root overlay...", NULL);
 
-    char cmd[512];
     struct stat st;
     if (stat("/tmp/sr_data/root-0/upper", &st) == -1) {
         snprintf(result.message, sizeof(result.message),
                  "Data partition structure not found");
-        storage_umount(&data_mp);
-        return result;
+        goto cleanup;
     }
 
     snprintf(cmd, sizeof(cmd),
@@ -63,8 +70,12 @@ static operation_result_t op_execute(progress_callback_t progress, void *ctx)
     if (utils_shell_exec(cmd) != 0) {
         snprintf(result.message, sizeof(result.message),
                  "Failed to clean root overlay");
-        storage_umount(&data_mp);
-        return result;
+        goto cleanup;
+    }
+
+    if (service_manager_cancelled()) {
+        snprintf(result.message, sizeof(result.message), "Operation cancelled by user");
+        goto cleanup;
     }
 
     if (progress) progress(50, "Cleaning user directory...", NULL);
@@ -76,14 +87,11 @@ static operation_result_t op_execute(progress_callback_t progress, void *ctx)
     if (utils_shell_exec(cmd) != 0) {
         snprintf(result.message, sizeof(result.message),
                  "Failed to clean user directory");
-        storage_umount(&data_mp);
-        return result;
+        goto cleanup;
     }
 
     if (progress) progress(90, "Syncing filesystem...", NULL);
     utils_shell_exec("sync");
-
-    storage_umount(&data_mp);
 
     if (progress) progress(100, "Light recovery complete", NULL);
 
@@ -91,6 +99,9 @@ static operation_result_t op_execute(progress_callback_t progress, void *ctx)
     result.error_code = 0;
     snprintf(result.message, sizeof(result.message),
              "Lightweight system recovery completed successfully");
+
+cleanup:
+    if (data_mounted) storage_umount(&data_mp);
     return result;
 }
 
