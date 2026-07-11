@@ -9,7 +9,6 @@
 #include "services/service_manager.h"
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 
 static mount_point_t recovery_mp;
 static mount_point_t data_mp;
@@ -101,8 +100,13 @@ static operation_result_t op_execute(progress_callback_t progress, void *ctx)
 
     /* 4. Flash kernel A */
     if (progress) progress(35, "Flashing kernel A...", NULL);
-    utils_shell_exec("partprobe /dev/mmcblk0");
-    utils_shell_exec("mkfs.ext4 -F /dev/mmcblk0p3");
+    if (utils_shell_exec("partprobe /dev/mmcblk0") != 0) {
+        fprintf(stderr, "deep_recovery: partprobe warning (continuing)\n");
+    }
+    if (utils_shell_exec("mkfs.ext4 -F /dev/mmcblk0p3") != 0) {
+        snprintf(result.message, sizeof(result.message), "Failed to format kernel A partition");
+        goto cleanup;
+    }
     snprintf(cmd, sizeof(cmd), "dd if=/tmp/sr_recovery/kernela.img of=/dev/mmcblk0p3 bs=4M");
     if (utils_shell_exec(cmd) != 0) {
         snprintf(result.message, sizeof(result.message), "Failed to flash kernel A");
@@ -112,7 +116,10 @@ static operation_result_t op_execute(progress_callback_t progress, void *ctx)
 
     /* 5. Flash kernel B */
     if (progress) progress(45, "Flashing kernel B...", NULL);
-    utils_shell_exec("mkfs.ext4 -F /dev/mmcblk0p4");
+    if (utils_shell_exec("mkfs.ext4 -F /dev/mmcblk0p4") != 0) {
+        snprintf(result.message, sizeof(result.message), "Failed to format kernel B partition");
+        goto cleanup;
+    }
     snprintf(cmd, sizeof(cmd), "dd if=/tmp/sr_recovery/kernela.img of=/dev/mmcblk0p4 bs=4M");
     if (utils_shell_exec(cmd) != 0) {
         snprintf(result.message, sizeof(result.message), "Failed to flash kernel B");
@@ -122,7 +129,10 @@ static operation_result_t op_execute(progress_callback_t progress, void *ctx)
 
     /* 6. Flash rootfs A */
     if (progress) progress(55, "Flashing rootfs A...", NULL);
-    utils_shell_exec("mkfs.ext4 -F /dev/mmcblk0p5");
+    if (utils_shell_exec("mkfs.ext4 -F /dev/mmcblk0p5") != 0) {
+        snprintf(result.message, sizeof(result.message), "Failed to format rootfs A partition");
+        goto cleanup;
+    }
     if (storage_mount(&root_a_mp) != 0) {
         snprintf(result.message, sizeof(result.message), "Failed to mount rootfs A");
         goto cleanup;
@@ -139,7 +149,10 @@ static operation_result_t op_execute(progress_callback_t progress, void *ctx)
 
     /* 7. Flash rootfs B */
     if (progress) progress(70, "Flashing rootfs B...", NULL);
-    utils_shell_exec("mkfs.ext4 -F /dev/mmcblk0p6");
+    if (utils_shell_exec("mkfs.ext4 -F /dev/mmcblk0p6") != 0) {
+        snprintf(result.message, sizeof(result.message), "Failed to format rootfs B partition");
+        goto cleanup;
+    }
     if (storage_mount(&root_b_mp) != 0) {
         snprintf(result.message, sizeof(result.message), "Failed to mount rootfs B");
         goto cleanup;
@@ -183,12 +196,7 @@ cleanup:
     if (data_mounted)   storage_umount(&data_mp);
     if (root_b_mounted) storage_umount(&root_b_mp);
     if (root_a_mounted) storage_umount(&root_a_mp);
-    if (recovery_mounted) {
-        storage_umount(&recovery_mp);
-        if (!result.success) {
-            /* Ensure recovery partition is cleanly unmounted on failure */
-        }
-    }
+    if (recovery_mounted) storage_umount(&recovery_mp);
 
 #undef CHECK_CANCEL
     return result;
@@ -202,16 +210,5 @@ static void op_cleanup(void)
     storage_umount(&root_b_mp);
 }
 
-__attribute__((constructor))
-static void register_plugin(void)
-{
-    static operation_plugin_t plugin = {
-        .name        = "deep_recovery",
-        .description = "Deep System Recovery (Full Reflash)",
-        .validate    = op_validate,
-        .init        = op_init,
-        .execute     = op_execute,
-        .cleanup     = op_cleanup,
-    };
-    operation_plugin_register(&plugin);
-}
+REGISTER_OPERATION_PLUGIN(deep_recovery, "Deep System Recovery (Full Reflash)",
+                           op_validate, op_init, op_execute, op_cleanup);

@@ -31,7 +31,6 @@ typedef struct {
     progress_callback_t       progress_cb;
     void (*complete_cb)(const operation_result_t *result, void *ctx);
     void                     *ctx;
-    operation_result_t         result;
 } worker_ctx_t;
 
 static pthread_t     worker_thread;
@@ -55,6 +54,11 @@ static void *worker_thread_func(void *arg)
 
     if (wctx->complete_cb && !cancel_requested) {
         wctx->complete_cb(&result, wctx->ctx);
+    }
+
+    /* Always call cleanup as safety net for any resources from init/execute */
+    if (wctx->plugin->cleanup) {
+        wctx->plugin->cleanup();
     }
 
     worker_running = false;

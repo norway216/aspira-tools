@@ -509,8 +509,13 @@ static char *grape_find_hidraw(void)
         fclose(fp);
 
         if (has_vid && has_pid) {
-            char *path = malloc(32);
-            if (path) { snprintf(path, 32, "/dev/%s", ent->d_name); closedir(d); return path; }
+            size_t plen = strlen(ent->d_name) + 6;  /* "/dev/" + name + NUL */
+            char *path = malloc(plen);
+            if (path) {
+                snprintf(path, plen, "/dev/%s", ent->d_name);
+                closedir(d);
+                return path;
+            }
         }
     }
     closedir(d);

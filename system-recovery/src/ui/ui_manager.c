@@ -113,6 +113,9 @@ screen_id_t ui_manager_current_screen(void)
 
 uint32_t ui_manager_tick(void)
 {
+    /* Apply deferred LVGL updates from worker thread before processing */
+    screen_progress_apply_updates();
+
     uint32_t delay = lv_task_handler();
     /* Update time display if needed */
     static uint32_t last_time = 0;

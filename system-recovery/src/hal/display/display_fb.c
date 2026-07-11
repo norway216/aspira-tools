@@ -63,6 +63,16 @@ void display_flush(const display_area_t *area, uint32_t *color_data)
         return;
     }
 
+    /* Bounds check — prevent OOB framebuffer writes */
+    if (area->x1 < 0 || area->y1 < 0 ||
+        area->x2 >= (int32_t)vinfo.xres || area->y2 >= (int32_t)vinfo.yres ||
+        area->x1 > area->x2 || area->y1 > area->y2) {
+        fprintf(stderr, "display: flush area [%d,%d-%d,%d] out of bounds (%dx%d)\n",
+                area->x1, area->y1, area->x2, area->y2,
+                vinfo.xres, vinfo.yres);
+        return;
+    }
+
     int32_t w = area->x2 - area->x1 + 1;
     int32_t h = area->y2 - area->y1 + 1;
     uint32_t row_bytes = (uint32_t)w * 4;  /* 32 bpp = 4 bytes/pixel */

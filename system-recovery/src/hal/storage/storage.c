@@ -12,7 +12,7 @@
 
 int storage_mount(mount_point_t *mp)
 {
-    if (mp == NULL) return -1;
+    if (mp == NULL || mp->device == NULL || mp->mount_path == NULL) return -1;
 
     struct stat st;
     if (stat(mp->mount_path, &st) == -1) {
@@ -111,9 +111,10 @@ int storage_read_version(const char *mount_path, version_info_t *info)
         if (nl) *nl = '\0';
 
         if (strncmp(line, "Model=", 6) == 0) {
-            strncpy(info->model, line + 6, sizeof(info->model) - 1);
+            /* Explicit format truncation — model field is 64 bytes */
+            snprintf(info->model, sizeof(info->model), "%s", line + 6);
         } else if (strncmp(line, "SoftwareVersion=", 16) == 0) {
-            strncpy(info->version, line + 16, sizeof(info->version) - 1);
+            snprintf(info->version, sizeof(info->version), "%s", line + 16);
         }
     }
     fclose(fp);

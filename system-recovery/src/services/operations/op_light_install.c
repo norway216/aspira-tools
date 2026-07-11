@@ -5,6 +5,7 @@
 
 #include "op_interface.h"
 #include "common/utils.h"
+#include "services/service_manager.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -47,6 +48,11 @@ static operation_result_t op_execute(progress_callback_t progress, void *ctx)
     int total = (int)(sizeof(steps) / sizeof(steps[0]));
 
     for (int i = 0; i < total; i++) {
+        if (service_manager_cancelled()) {
+            snprintf(result.message, sizeof(result.message), "Operation cancelled by user");
+            return result;
+        }
+
         if (progress) progress(steps[i].pct, steps[i].desc, NULL);
 
         char cmd[512];
@@ -70,16 +76,5 @@ static operation_result_t op_execute(progress_callback_t progress, void *ctx)
 
 static void op_cleanup(void) { }
 
-__attribute__((constructor))
-static void register_plugin(void)
-{
-    static operation_plugin_t plugin = {
-        .name        = "light_install",
-        .description = "Lightweight System Installation",
-        .validate    = op_validate,
-        .init        = op_init,
-        .execute     = op_execute,
-        .cleanup     = op_cleanup,
-    };
-    operation_plugin_register(&plugin);
-}
+REGISTER_OPERATION_PLUGIN(light_install, "Lightweight System Installation",
+                           op_validate, op_init, op_execute, op_cleanup);

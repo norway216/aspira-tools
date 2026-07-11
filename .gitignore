@@ -58,5 +58,5 @@ CMakeUserPresets.json
 .DS_Store
 
 # core dumps
-core
-core.*
+core.[0-9]*
+core.[0-9]*.[0-9]*

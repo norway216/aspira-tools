@@ -53,4 +53,26 @@ const operation_plugin_t *operation_plugin_find(const char *name);
 /** De-register all plugins. */
 void operation_plugin_deregister_all(void);
 
+/**
+ * Convenience macro to auto-register a plugin via __attribute__((constructor)).
+ * Place at file scope in each plugin .c file:
+ *
+ *   REGISTER_OPERATION_PLUGIN(light_recovery, "Lightweight System Recovery",
+ *                              validate, init, execute, cleanup);
+ */
+#define REGISTER_OPERATION_PLUGIN(_name, _desc, _val, _init, _exec, _clean) \
+    __attribute__((constructor)) \
+    static void _op_register_##_name(void) \
+    { \
+        static operation_plugin_t _plugin_##_name = { \
+            .name        = #_name, \
+            .description = _desc, \
+            .validate    = _val, \
+            .init        = _init, \
+            .execute     = _exec, \
+            .cleanup     = _clean, \
+        }; \
+        operation_plugin_register(&_plugin_##_name); \
+    }
+
 #endif /* SERVICES_OPERATIONS_OP_INTERFACE_H */
