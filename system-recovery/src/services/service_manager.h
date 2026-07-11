@@ -39,4 +39,7 @@ bool service_manager_is_busy(void);
 /** Cancel a running operation (best-effort). */
 void service_manager_cancel(void);
 
+/** Check if the current operation has been requested to cancel. */
+bool service_manager_cancelled(void);
+
 #endif /* SERVICES_SERVICE_MANAGER_H */

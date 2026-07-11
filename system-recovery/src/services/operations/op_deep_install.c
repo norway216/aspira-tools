@@ -6,8 +6,10 @@
 #include "op_interface.h"
 #include "hal/storage/storage.h"
 #include "common/utils.h"
+#include "services/service_manager.h"
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define UPDATE_SCRIPT "/scripts/init-bottom/zz-jelina_flasher"
 #define VARS_CONF     "/tmp/flash_vars.conf"
@@ -51,7 +53,25 @@ static operation_result_t op_execute(progress_callback_t progress, void *ctx)
     (void)ctx;
     operation_result_t result = { .success = false, .error_code = -1 };
 
+    /* Validate the vars file before sourcing it from /tmp */
+    bool use_vars = false;
+    struct stat st;
+    if (stat(VARS_CONF, &st) == 0 && S_ISREG(st.st_mode)) {
+        /* Only source if owned by root and not world-writable */
+        if (st.st_uid == 0 && (st.st_mode & S_IWOTH) == 0) {
+            use_vars = true;
+        } else {
+            fprintf(stderr, "deep_install: refusing to source %s (unsafe permissions)\n",
+                    VARS_CONF);
+        }
+    }
+
     for (int i = 0; i < TOTAL_STEPS; i++) {
+        if (service_manager_cancelled()) {
+            snprintf(result.message, sizeof(result.message), "Operation cancelled by user");
+            return result;
+        }
+
         if (steps[i].func == NULL) {
             if (progress) progress(100, "Installation complete", NULL);
             break;
@@ -63,7 +83,7 @@ static operation_result_t op_execute(progress_callback_t progress, void *ctx)
         char log_file[64];
         snprintf(log_file, sizeof(log_file), "/tmp/update_step%d.log", i);
 
-        if (i == 0 || i == 1 || i == (TOTAL_STEPS - 1)) {
+        if (i == 0 || i == 1 || i == (TOTAL_STEPS - 1) || !use_vars) {
             snprintf(cmd, sizeof(cmd), "%s %s > %s 2>&1",
                      UPDATE_SCRIPT, steps[i].func, log_file);
         } else {

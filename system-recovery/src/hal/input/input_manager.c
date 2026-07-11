@@ -11,6 +11,7 @@
  */
 
 #include "input_manager.h"
+#include "common/utils.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -91,6 +92,8 @@ typedef struct {
     int            abs_raw_x, abs_raw_y;
     int            last_abs_x, last_abs_y;
     int            last_mt_x, last_mt_y;
+    bool           abs_initialized;   /* true after first ABS event received */
+    bool           mt_initialized;    /* true after first MT event received */
     bool           touch_down;
     int            idle_reads;
     int            x_min, x_max, y_min, y_max;
@@ -130,6 +133,7 @@ static int             kbd_count = 0;
 
 static pthread_mutex_t input_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool            discovered = false;
+static bool            fds_stale  = true;  /* FDs need re-opening next poll */
 
 /* Cursor / unified state */
 static int32_t  cursor_x     = -1;
@@ -426,7 +430,7 @@ static void merge_devices(void)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Keyboard Discovery                                                 */
+/*  Keyboard Discovery  (uses already-parsed devices from parse_proc_input) */
 /* ------------------------------------------------------------------ */
 
 static bool is_aux_kbd(const char *name) {
@@ -436,48 +440,31 @@ static bool is_aux_kbd(const char *name) {
 static void discover_keyboards(void)
 {
     kbd_count = 0;
-    FILE *fp = fopen("/proc/bus/input/devices", "r");
-    if (!fp) return;
 
-    char line[512], name[256] = "", handlers[256] = "";
-    bool in_block = false, has_key = false;
+    /* Reuse parsed_devices — no need to re-read /proc/bus/input/devices */
+    for (int i = 0; i < parsed_count && kbd_count < MAX_KEYBOARD_DEVICES; i++) {
+        const parsed_device_t *d = &parsed_devices[i];
+        if (!d->has_key || d->event_count == 0) continue;
+        if (is_aux_kbd(d->name)) continue;
+        if (strstr(d->name, "GigaDevice") || strstr(d->name, "GD32-CustomHID")) continue;
 
-    while (fgets(line, sizeof(line), fp)) {
-        if (line[0] == '\n') {
-            if (in_block && has_key && handlers[0] && name[0] &&
-                !is_aux_kbd(name) && strstr(name, "GigaDevice") == NULL &&
-                strstr(name, "GD32-CustomHID") == NULL && strstr(handlers, "kbd")) {
-                char *tok = strstr(handlers, "event");
-                if (tok) {
-                    int num = -1;
-                    if (sscanf(tok, "event%d", &num) == 1 && num >= 0 && kbd_count < MAX_KEYBOARD_DEVICES) {
-                        snprintf(keyboards[kbd_count].path, sizeof(keyboards[kbd_count].path),
-                                 "/dev/input/event%d", num);
-                        keyboards[kbd_count].fd = -1;
-                        keyboards[kbd_count].connected = false;
-                        kbd_count++;
-                    }
-                }
+        /* Check if any handler includes kbd */
+        bool has_kbd_handler = false;
+        for (int e = 0; e < d->event_count; e++) {
+            if (strstr(d->event_paths[e], "event") && strstr(d->handlers, "kbd")) {
+                has_kbd_handler = true;
+                break;
             }
-            in_block = false; has_key = false;
-            name[0] = handlers[0] = '\0';
-            continue;
         }
-        if (line[0] == 'I' && line[1] == ':') { in_block = true; continue; }
-        if (!in_block) continue;
-        if (line[0] == 'N' && line[1] == ':') {
-            char *q1 = strchr(line, '"');
-            if (q1) { char *q2 = strrchr(q1+1, '"'); if (q2) {
-                size_t l = (size_t)(q2-q1-1); if (l >= sizeof(name)) l = sizeof(name)-1;
-                memcpy(name, q1+1, l); name[l] = '\0';
-            }}
-        } else if (line[0] == 'H' && line[1] == ':') {
-            sscanf(line, "H: Handlers=%255[^\n]", handlers);
-        } else if (line[0] == 'B' && line[1] == ':' && strstr(line, "KEY=")) {
-            has_key = true;
-        }
+        if (!has_kbd_handler) continue;
+
+        /* Use first event path */
+        snprintf(keyboards[kbd_count].path, sizeof(keyboards[kbd_count].path),
+                 "%s", d->event_paths[0]);
+        keyboards[kbd_count].fd        = -1;
+        keyboards[kbd_count].connected = false;
+        kbd_count++;
     }
-    fclose(fp);
 
     /* Fallback for embedded platforms */
     if (kbd_count == 0) {
@@ -566,8 +553,8 @@ static void open_group_fds(input_group_t *g)
                 break;
             }
         }
-        g->last_abs_x = g->last_abs_y = 8888;
-        g->last_mt_x = g->last_mt_y = 8888;
+        g->abs_initialized = false;
+        g->mt_initialized  = false;
     }
 }
 
@@ -600,11 +587,11 @@ static void tp_abs_finger(bool down)
 {
     if (down) {
         if (tp_finger_dn) return;
-        uint32_t now = utils_tick_get();  /* fallback to lv_tick_get in context */
+        uint32_t now = utils_tick_get();
         tp_finger_dn = true;
         tp_group.touch_down = true;
-        tp_group.last_abs_x = tp_group.last_abs_y = 8888;
-        tp_group.last_mt_x = tp_group.last_mt_y = 8888;
+        tp_group.abs_initialized = false;
+        tp_group.mt_initialized  = false;
 
         if (tp_last_tap && (now - tp_last_tap) < (uint32_t)dbl_click_ms) {
             tp_lvgl_click = true;
@@ -616,8 +603,8 @@ static void tp_abs_finger(bool down)
         if (!tp_finger_dn) return;
         tp_finger_dn = false;
         tp_group.touch_down = false;
-        tp_group.last_abs_x = tp_group.last_abs_y = 8888;
-        tp_group.last_mt_x = tp_group.last_mt_y = 8888;
+        tp_group.abs_initialized = false;
+        tp_group.mt_initialized  = false;
     }
 }
 
@@ -631,24 +618,28 @@ static void process_tp_event(const struct input_event *ev, int fd_idx)
     if (ev->type == EV_ABS) {
         if (ev->code == ABS_MT_TRACKING_ID) { tp_abs_finger(ev->value >= 0); return; }
         if (ev->code == ABS_X && fd_idx >= 0 && tp_group.fd_has_abs_xy[fd_idx]) {
-            if (tp_group.last_abs_x != 8888) { cursor_x += ev->value - tp_group.last_abs_x; clamp_cursor(); }
+            if (tp_group.abs_initialized) { cursor_x += ev->value - tp_group.last_abs_x; clamp_cursor(); }
             tp_group.last_abs_x = ev->value;
-            tp_group.idle_reads = 0; tp_last_act = 0; /* set by caller */
+            tp_group.abs_initialized = true;
+            tp_group.idle_reads = 0; tp_last_act = 0;
             return;
         }
         if (ev->code == ABS_Y && fd_idx >= 0 && tp_group.fd_has_abs_xy[fd_idx]) {
-            if (tp_group.last_abs_y != 8888) { cursor_y += ev->value - tp_group.last_abs_y; clamp_cursor(); }
+            if (tp_group.abs_initialized) { cursor_y += ev->value - tp_group.last_abs_y; clamp_cursor(); }
             tp_group.last_abs_y = ev->value;
+            tp_group.abs_initialized = true;
             return;
         }
         if (ev->code == ABS_MT_POSITION_X && fd_idx >= 0 && tp_group.fd_has_abs_mt[fd_idx]) {
-            if (tp_group.last_mt_x != 8888) { cursor_x += ev->value - tp_group.last_mt_x; clamp_cursor(); }
+            if (tp_group.mt_initialized) { cursor_x += ev->value - tp_group.last_mt_x; clamp_cursor(); }
             tp_group.last_mt_x = ev->value;
+            tp_group.mt_initialized = true;
             return;
         }
         if (ev->code == ABS_MT_POSITION_Y && fd_idx >= 0 && tp_group.fd_has_abs_mt[fd_idx]) {
-            if (tp_group.last_mt_y != 8888) { cursor_y += ev->value - tp_group.last_mt_y; clamp_cursor(); }
+            if (tp_group.mt_initialized) { cursor_y += ev->value - tp_group.last_mt_y; clamp_cursor(); }
             tp_group.last_mt_y = ev->value;
+            tp_group.mt_initialized = true;
             return;
         }
         return;
@@ -715,6 +706,7 @@ static void read_group(input_group_t *g, void (*handler)(const struct input_even
         while ((n = read(g->fds[i], &ev, sizeof(ev))) > 0) handler(&ev, i);
         if (n < 0 && (errno == ENODEV || errno == EIO)) {
             close(g->fds[i]); g->fds[i] = -1;
+            fds_stale = true;
         }
     }
 }
@@ -729,6 +721,7 @@ static void read_group_simple(input_group_t *g, void (*handler)(const struct inp
         while ((n = read(g->fds[i], &ev, sizeof(ev))) > 0) handler(&ev);
         if (n < 0 && (errno == ENODEV || errno == EIO)) {
             close(g->fds[i]); g->fds[i] = -1;
+            fds_stale = true;
         }
     }
 }
@@ -747,7 +740,10 @@ static void update_buttons(void)
 
 static void poll_all_events(void)
 {
-    open_all_fds();
+    if (fds_stale) {
+        open_all_fds();
+        fds_stale = false;
+    }
 
     /* Touchpad */
     if (tp_active && tp_group.connected) {
@@ -762,18 +758,14 @@ static void poll_all_events(void)
 
     /* Mice */
     for (int i = 0; i < mouse_count; i++) {
-        if (!mice[i].active) continue;
-        if (mice[i].fd < 0) {
-            mice[i].fd = open(mice[i].path, O_RDONLY | O_NONBLOCK);
-            mice[i].connected = (mice[i].fd >= 0);
-            continue;
-        }
+        if (!mice[i].active || mice[i].fd < 0) continue;
         struct input_event ev;
         ssize_t n;
         while ((n = read(mice[i].fd, &ev, sizeof(ev))) > 0)
             process_mouse_event(i, &ev);
         if (n < 0 && (errno == ENODEV || errno == EIO)) {
             close(mice[i].fd); mice[i].fd = -1; mice[i].connected = false;
+            fds_stale = true;
         }
     }
 
@@ -904,6 +896,39 @@ void input_manager_dump_devices(void)
     printf("mice: %d  keyboards: %d\n", mouse_count, kbd_count);
     printf("parsed devices: %d\n", parsed_count);
     printf("=============================\n");
+}
+
+int input_manager_get_poll_fds(int *fds, int max_fds)
+{
+    int count = 0;
+    if (fds == NULL || max_fds <= 0) return 0;
+
+    /* Touchpad FDs */
+    if (tp_active) {
+        for (int i = 0; i < tp_group.event_count && count < max_fds; i++) {
+            if (tp_group.fds[i] >= 0) fds[count++] = tp_group.fds[i];
+        }
+    }
+    /* Touchscreen FDs */
+    if (ts_active) {
+        for (int i = 0; i < ts_group.event_count && count < max_fds; i++) {
+            if (ts_group.fds[i] >= 0) fds[count++] = ts_group.fds[i];
+        }
+    }
+    /* Mouse FDs */
+    for (int i = 0; i < mouse_count && count < max_fds; i++) {
+        if (mice[i].fd >= 0) fds[count++] = mice[i].fd;
+    }
+    /* Keyboard FDs */
+    for (int i = 0; i < kbd_count && count < max_fds; i++) {
+        if (keyboards[i].fd >= 0) fds[count++] = keyboards[i].fd;
+    }
+    /* Grape HID */
+    if (grape_fd >= 0 && count < max_fds) {
+        fds[count++] = grape_fd;
+    }
+
+    return count;
 }
 
 void input_manager_deinit(void)

@@ -6,6 +6,7 @@
 #include "op_interface.h"
 #include "hal/storage/storage.h"
 #include "common/utils.h"
+#include "services/service_manager.h"
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -53,47 +54,61 @@ static operation_result_t op_execute(progress_callback_t progress, void *ctx)
 {
     (void)ctx;
     operation_result_t result = { .success = false, .error_code = -1 };
+    bool recovery_mounted = false;
+    bool root_a_mounted = false;
+    bool root_b_mounted = false;
+    bool data_mounted = false;
+    char cmd[512];
+
+#define CHECK_CANCEL do { \
+    if (service_manager_cancelled()) { \
+        snprintf(result.message, sizeof(result.message), "Operation cancelled by user"); \
+        goto cleanup; \
+    } \
+} while(0)
 
     /* 1. Clear U-Boot environment */
     if (progress) progress(5, "Clearing boot environment...", NULL);
     if (utils_shell_exec("dd if=/dev/zero of=/dev/mmcblk0 bs=1K count=8 seek=4064") != 0) {
         snprintf(result.message, sizeof(result.message), "Failed to clear ENV section");
-        return result;
+        goto cleanup;
     }
+    CHECK_CANCEL;
 
     /* 2. Mount recovery partition */
     if (progress) progress(10, "Mounting recovery partition...", NULL);
     if (storage_mount(&recovery_mp) != 0) {
         snprintf(result.message, sizeof(result.message), "Failed to mount recovery partition");
-        return result;
+        goto cleanup;
     }
+    recovery_mounted = true;
+    CHECK_CANCEL;
 
     /* 3. Verify checksums */
     if (progress) progress(15, "Verifying kernel checksum...", NULL);
     if (!utils_verify_md5("/tmp/sr_recovery/kernela.img")) {
         snprintf(result.message, sizeof(result.message), "Kernel MD5 verification failed");
-        storage_umount(&recovery_mp);
-        return result;
+        goto cleanup;
     }
+    CHECK_CANCEL;
 
     if (progress) progress(25, "Verifying rootfs checksum...", NULL);
     if (!utils_verify_md5("/tmp/sr_recovery/roota.tar.gz")) {
         snprintf(result.message, sizeof(result.message), "Rootfs MD5 verification failed");
-        storage_umount(&recovery_mp);
-        return result;
+        goto cleanup;
     }
+    CHECK_CANCEL;
 
     /* 4. Flash kernel A */
     if (progress) progress(35, "Flashing kernel A...", NULL);
     utils_shell_exec("partprobe /dev/mmcblk0");
     utils_shell_exec("mkfs.ext4 -F /dev/mmcblk0p3");
-    char cmd[512];
     snprintf(cmd, sizeof(cmd), "dd if=/tmp/sr_recovery/kernela.img of=/dev/mmcblk0p3 bs=4M");
     if (utils_shell_exec(cmd) != 0) {
         snprintf(result.message, sizeof(result.message), "Failed to flash kernel A");
-        storage_umount(&recovery_mp);
-        return result;
+        goto cleanup;
     }
+    CHECK_CANCEL;
 
     /* 5. Flash kernel B */
     if (progress) progress(45, "Flashing kernel B...", NULL);
@@ -101,48 +116,48 @@ static operation_result_t op_execute(progress_callback_t progress, void *ctx)
     snprintf(cmd, sizeof(cmd), "dd if=/tmp/sr_recovery/kernela.img of=/dev/mmcblk0p4 bs=4M");
     if (utils_shell_exec(cmd) != 0) {
         snprintf(result.message, sizeof(result.message), "Failed to flash kernel B");
-        storage_umount(&recovery_mp);
-        return result;
+        goto cleanup;
     }
+    CHECK_CANCEL;
 
     /* 6. Flash rootfs A */
     if (progress) progress(55, "Flashing rootfs A...", NULL);
     utils_shell_exec("mkfs.ext4 -F /dev/mmcblk0p5");
     if (storage_mount(&root_a_mp) != 0) {
         snprintf(result.message, sizeof(result.message), "Failed to mount rootfs A");
-        storage_umount(&recovery_mp);
-        return result;
+        goto cleanup;
     }
+    root_a_mounted = true;
     snprintf(cmd, sizeof(cmd), "tar -xzf /tmp/sr_recovery/roota.tar.gz -C /tmp/sr_roota/");
     if (utils_shell_exec(cmd) != 0) {
         snprintf(result.message, sizeof(result.message), "Failed to extract rootfs A");
-        storage_umount(&root_a_mp);
-        storage_umount(&recovery_mp);
-        return result;
+        goto cleanup;
     }
     storage_umount(&root_a_mp);
+    root_a_mounted = false;
+    CHECK_CANCEL;
 
     /* 7. Flash rootfs B */
     if (progress) progress(70, "Flashing rootfs B...", NULL);
     utils_shell_exec("mkfs.ext4 -F /dev/mmcblk0p6");
     if (storage_mount(&root_b_mp) != 0) {
         snprintf(result.message, sizeof(result.message), "Failed to mount rootfs B");
-        storage_umount(&recovery_mp);
-        return result;
+        goto cleanup;
     }
+    root_b_mounted = true;
     snprintf(cmd, sizeof(cmd), "tar -xzf /tmp/sr_recovery/roota.tar.gz -C /tmp/sr_rootb/");
     if (utils_shell_exec(cmd) != 0) {
         snprintf(result.message, sizeof(result.message), "Failed to extract rootfs B");
-        storage_umount(&root_b_mp);
-        storage_umount(&recovery_mp);
-        return result;
+        goto cleanup;
     }
     storage_umount(&root_b_mp);
-    storage_umount(&recovery_mp);
+    root_b_mounted = false;
 
     /* 8. Clean data partition overlay */
+    CHECK_CANCEL;
     if (progress) progress(85, "Cleaning data partition...", NULL);
     if (storage_mount(&data_mp) == 0) {
+        data_mounted = true;
         snprintf(cmd, sizeof(cmd),
                  "cd /tmp/sr_data/root-0/upper && "
                  "find . -maxdepth 1 ! -name '.' ! -name 'harddisk' ! -name 'usr' "
@@ -151,6 +166,7 @@ static operation_result_t op_execute(progress_callback_t progress, void *ctx)
                  "-exec rm -rf {} \\;");
         utils_shell_exec(cmd);
         storage_umount(&data_mp);
+        data_mounted = false;
     }
 
     if (progress) progress(100, "Deep recovery complete", NULL);
@@ -161,6 +177,20 @@ static operation_result_t op_execute(progress_callback_t progress, void *ctx)
     result.error_code = 0;
     snprintf(result.message, sizeof(result.message),
              "Deep system recovery completed successfully");
+
+cleanup:
+    /* Always unmount any still-mounted partitions */
+    if (data_mounted)   storage_umount(&data_mp);
+    if (root_b_mounted) storage_umount(&root_b_mp);
+    if (root_a_mounted) storage_umount(&root_a_mp);
+    if (recovery_mounted) {
+        storage_umount(&recovery_mp);
+        if (!result.success) {
+            /* Ensure recovery partition is cleanly unmounted on failure */
+        }
+    }
+
+#undef CHECK_CANCEL
     return result;
 }
 

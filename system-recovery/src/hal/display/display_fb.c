@@ -54,17 +54,29 @@ bool display_init(void)
 void display_flush(const display_area_t *area, uint32_t *color_data)
 {
     if (!initialized || fbp == NULL) return;
+    if (area == NULL || color_data == NULL) return;
+
+    /* Validate 32 bpp — this code assumes 4-byte pixels */
+    if (vinfo.bits_per_pixel != 32) {
+        fprintf(stderr, "display: unsupported bpp %d (expected 32)\n",
+                vinfo.bits_per_pixel);
+        return;
+    }
 
     int32_t w = area->x2 - area->x1 + 1;
     int32_t h = area->y2 - area->y1 + 1;
+    uint32_t row_bytes = (uint32_t)w * 4;  /* 32 bpp = 4 bytes/pixel */
+    uint32_t line_len  = (uint32_t)finfo.line_length;
 
-    for (int32_t y = area->y1; y <= area->y2; y++) {
-        for (int32_t x = area->x1; x <= area->x2; x++) {
-            long int loc = (x + vinfo.xoffset) * (vinfo.bits_per_pixel / 8) +
-                           (y + vinfo.yoffset) * finfo.line_length;
-            fbp[loc / 4] = *color_data;
-            color_data++;
-        }
+    /* Row-by-row memcpy — far faster than per-pixel loops */
+    for (int32_t y = 0; y < h; y++) {
+        uint32_t y_offset = (uint32_t)(area->y1 + y + vinfo.yoffset) * line_len;
+        uint32_t x_offset = (uint32_t)(area->x1 + vinfo.xoffset) * 4;
+        long int byte_off = (long int)(y_offset + x_offset);
+
+        memcpy((uint8_t *)fbp + byte_off,
+               color_data + (uint32_t)y * (uint32_t)w,
+               row_bytes);
     }
 }
 
