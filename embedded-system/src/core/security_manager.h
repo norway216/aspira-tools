@@ -24,15 +24,20 @@ public:
 
     // ---- ISecurityManager interface ----
 
-    Result<std::string> sha256_file(const std::string& file_path) override;
-    Result<std::string> sha256_stream(std::istream& stream) override;
-    std::string sha256_data(const std::vector<uint8_t>& data) override;
+    Result<std::string> sha256_file(const std::string& file_path);
 
-    Result<bool> verify_ed25519(const std::vector<uint8_t>& message_digest,
-                                 const std::vector<uint8_t>& signature,
-                                 const std::vector<uint8_t>& public_key) override;
+    std::string compute_sha256(const std::vector<uint8_t>& data) override;
 
-    Result<std::vector<uint8_t>> load_public_key() override;
+    Result<std::string> compute_sha256_stream(std::istream& stream) override;
+
+    bool verify_sha256(const std::vector<uint8_t>& data,
+                       const std::string& expected_hash) override;
+
+    Result<bool> verify_signature(const std::vector<uint8_t>& data,
+                                   const std::vector<uint8_t>& signature,
+                                   const std::string& public_key) override;
+
+    Result<std::vector<uint8_t>> load_public_key();
 
     Result<std::vector<uint8_t>> encrypt_aes256_gcm(const std::vector<uint8_t>& plaintext,
                                                       const std::vector<uint8_t>& key) override;

@@ -59,11 +59,11 @@ Result<void> CreateFilesystemsStep::execute(JobContext& ctx, ProgressCallback pr
         }
 
         // Resolve partition path.
-        auto part_result = part_mgr_->find_partition(ctx.target_device, part_name);
-        if (!part_result.is_ok()) {
+        auto part_result = part_mgr_->get_partition_by_label(ctx.target_device, part_name);
+        if (part_result.is_err()) {
             logger_->log(LogLevel::Error, step_id(), "partition_not_found" + std::string(": ") + "Cannot find partition: " + part_name +
                                " error=" + part_result.error().code);
-            return part_result;
+            return Result<void>::err(part_result.take_error());
         }
 
         std::string part_path = part_result.value();
@@ -104,7 +104,7 @@ Result<void> CreateFilesystemsStep::verify(JobContext& ctx, ProgressCallback pro
     }
 
     // Run fsck on the boot partition as a quick sanity check.
-    auto part_result = part_mgr_->find_partition(ctx.target_device, "boot");
+    auto part_result = part_mgr_->get_partition_by_label(ctx.target_device, "boot");
     if (part_result.is_ok()) {
         auto check_result = fs_mgr_->check(part_result.value());
         if (!check_result.is_ok()) {

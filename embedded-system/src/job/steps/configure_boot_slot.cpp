@@ -51,10 +51,9 @@ Result<void> ConfigureBootSlotStep::execute(JobContext& ctx, ProgressCallback pr
 
     // Read current boot environment.
     auto env_result = boot_ctrl_->read_boot_env();
-    if (!env_result.is_ok()) {
-        return env_result;
+    if (env_result.is_err()) {
+        return Result<void>::err(env_result.take_error());
     }
-
     BootEnv env = env_result.value();
 
     // Configure for A/B update:
@@ -128,11 +127,10 @@ Result<void> ConfigureBootSlotStep::verify(JobContext& ctx, ProgressCallback pro
 
     // Read back the environment and verify our changes took effect.
     auto env_result = boot_ctrl_->read_boot_env();
-    if (!env_result.is_ok()) {
-        return env_result;
+    if (env_result.is_err()) {
+        return Result<void>::err(env_result.take_error());
     }
-
-    const auto& env = env_result.value();
+    auto& env = env_result.value();
 
     if (env.next_slot != ctx.target_slot) {
         return Result<void>::err(InstallerError::make(

@@ -11,7 +11,7 @@
 #ifndef INSTALLER_CORE_BOOT_CONTROL_H
 #define INSTALLER_CORE_BOOT_CONTROL_H
 
-#include "installer/IBootControl.h"
+#include "installer/boot/iboot_control.h"
 #include "installer/core/types.h"
 #include "installer/core/result.h"
 #include "installer/platform/iprocess_runner.h"
@@ -37,12 +37,16 @@ public:
 
     // ---- IBootControl interface ----
 
-    Result<BootEnv> read_boot_env() override;
-    Result<void> write_boot_env(const BootEnv& env) override;
+    Result<BootEnv> get_boot_env() override;
+    Result<void> write_boot_env(const BootEnv& env);
     Result<void> set_active_slot(const std::string& slot) override;
     Result<void> set_upgrade_pending(bool pending) override;
     Result<void> mark_slot_good(const std::string& slot) override;
-    Result<std::string> get_inactive_slot() override;
+    Result<std::string> get_inactive_slot();
+    Result<std::string> get_current_slot() override;
+    Result<void> set_next_slot(const std::string& slot) override;
+    Result<void> request_recovery_boot() override;
+    Result<void> commit_boot_env() override;
 
     // ---- Extended API ----
 
@@ -59,14 +63,6 @@ public:
      * (script mode).  Semantically equivalent to write_boot_env().
      */
     Result<void> commit_boot_env(const BootEnv& env);
-
-    /**
-     * Set which slot to boot next.
-     *
-     * Writes `next_slot` and sets `upgrade_pending=1` so the bootloader
-     * will attempt the requested slot on the next boot.
-     */
-    Result<void> set_next_boot_slot(const std::string& slot);
 
     /**
      * Return the currently active slot ("A" or "B").

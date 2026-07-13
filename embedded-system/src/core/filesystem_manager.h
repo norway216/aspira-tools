@@ -26,18 +26,16 @@ public:
                         FilesystemType fs_type,
                         const std::string& label = "") override;
 
-    Result<void> mount(const std::string& device_path,
+    Result<void> mount(const std::string& partition,
                        const std::string& mount_point,
                        const std::string& fs_type = "",
-                       unsigned long mount_flags = 0) override;
+                       int flags = 0) override;
 
-    Result<void> umount(const std::string& mount_point, bool lazy = false) override;
+    Result<void> umount(const std::string& mount_point, bool force = false) override;
 
-    Result<bool> check(const std::string& device_path,
-                       FilesystemType fs_type,
-                       bool repair = false) override;
+    Result<void> check(const std::string& partition) override;
 
-    Result<bool> is_mounted(const std::string& path) override;
+    bool is_mounted(const std::string& path) override;
 
 private:
     // Convert FilesystemType to string for mount/format
@@ -59,7 +57,7 @@ public:
      */
     ScopedMount(IFilesystemManager* fs_mgr, const std::string& device_path,
                 const std::string& mount_point, const std::string& fs_type = "",
-                unsigned long mount_flags = 0);
+                int mount_flags = 0);
     ~ScopedMount();
 
     // Non-copyable, movable

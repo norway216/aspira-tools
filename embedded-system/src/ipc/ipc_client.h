@@ -10,7 +10,7 @@
 #define INSTALLER_IPC_CLIENT_H
 
 #include "installer/IIPCClient.h"
-#include "installer/ILogger.h"
+#include "installer/log/ilogger.h"
 #include "json_rpc_codec.h"
 #include <atomic>
 #include <chrono>

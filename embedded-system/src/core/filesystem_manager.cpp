@@ -11,7 +11,7 @@
 #include "filesystem_manager.h"
 
 #include "installer/platform/iprocess_runner.h"
-#include "common/file_utils.h"
+#include "src/common/file_utils.h"
 
 #include <algorithm>
 #include <cctype>
@@ -131,6 +131,19 @@ std::string parent_directory(const std::string& path) {
     return p.substr(0, pos);
 }
 
+// Compatibility wrapper: converts old-style (args, timeout) calls to the
+// new ProcessArgs-based IProcessRunner interface.
+Result<ProcessResult> run_process(IProcessRunner* runner,
+                                   const std::vector<std::string>& args,
+                                   std::chrono::milliseconds timeout) {
+    ProcessArgs pa;
+    pa.program = args[0];
+    pa.args.assign(args.begin() + 1, args.end());
+    pa.timeout = timeout;
+    CancellationToken cancel;
+    return runner->run(pa, cancel);
+}
+
 } // anonymous namespace
 
 // =============================================================================
@@ -231,7 +244,7 @@ Result<void> FilesystemManager::format(const std::string& device_path,
     }
 
     // ---- Execute the mkfs tool ----
-    auto run_result = proc_runner_->run(args, std::chrono::seconds(60));
+    auto run_result = run_process(proc_runner_, args, std::chrono::seconds(60));
     if (run_result.is_err()) {
         return Result<void>::err(run_result.take_error());
     }
@@ -272,10 +285,10 @@ Result<void> FilesystemManager::format(const std::string& device_path,
 // mount
 // =============================================================================
 
-Result<void> FilesystemManager::mount(const std::string& device_path,
+Result<void> FilesystemManager::mount(const std::string& partition,
                                       const std::string& mount_point,
                                       const std::string& fs_type,
-                                      unsigned long mount_flags) {
+                                      int flags) {
     std::lock_guard<std::mutex> lock(mutex_);
 
     // ---- Create the mount point directory if it does not exist ----
@@ -301,10 +314,10 @@ Result<void> FilesystemManager::mount(const std::string& device_path,
     // If fs_type is empty, pass nullptr so the kernel auto-detects.
 
     // ---- Perform the mount(2) syscall ----
-    int ret = ::mount(device_path.c_str(),
+    int ret = ::mount(partition.c_str(),
                       mount_point.c_str(),
                       fstype_arg,
-                      mount_flags,
+                      static_cast<unsigned long>(flags),
                       nullptr);    // data — not used for most filesystems
 
     if (ret != 0) {
@@ -313,10 +326,10 @@ Result<void> FilesystemManager::mount(const std::string& device_path,
         return Result<void>::err(make_errno_error(
             ErrorCode::FILESYSTEM_MOUNT_FAILED,
             "Mount Failed",
-            "Failed to mount " + device_path + " at " + mount_point +
+            "Failed to mount " + partition + " at " + mount_point +
                 " (" + fstype_desc + "): " + sys_msg,
-            "mount(\"" + device_path + "\", \"" + mount_point + "\", " +
-                fstype_desc + ", flags=" + std::to_string(mount_flags) + ")",
+            "mount(\"" + partition + "\", \"" + mount_point + "\", " +
+                fstype_desc + ", flags=" + std::to_string(flags) + ")",
             true));
     }
 
@@ -352,159 +365,137 @@ Result<void> FilesystemManager::umount(const std::string& mount_point,
 // check
 // =============================================================================
 
-Result<bool> FilesystemManager::check(const std::string& device_path,
-                                      FilesystemType fs_type,
-                                      bool repair) {
+Result<void> FilesystemManager::check(const std::string& partition) {
     std::lock_guard<std::mutex> lock(mutex_);
+
+    // Auto-detect filesystem type using blkid
+    FilesystemType fs_type = FilesystemType::Unknown;
+    {
+        std::vector<std::string> blkid_args = {"blkid", "-s", "TYPE", "-o", "value", partition};
+        auto blkid_result = run_process(proc_runner_, blkid_args, std::chrono::seconds(5));
+        if (blkid_result.is_ok() && blkid_result.value().exit_code == 0) {
+            std::string fstype_str = blkid_result.value().stdout_data;
+            // Trim whitespace
+            while (!fstype_str.empty() && (fstype_str.back() == '\n' || fstype_str.back() == '\r'))
+                fstype_str.pop_back();
+            if (fstype_str == "ext4" || fstype_str == "ext3" || fstype_str == "ext2")
+                fs_type = FilesystemType::EXT4;
+            else if (fstype_str == "vfat" || fstype_str == "fat32" || fstype_str == "fat16")
+                fs_type = FilesystemType::VFAT;
+            else if (fstype_str == "squashfs")
+                fs_type = FilesystemType::SquashFS;
+        }
+    }
 
     std::vector<std::string> args;
     std::string tool_name;
 
     switch (fs_type) {
-        // -----------------------------------------------------------------
-        // EXT4 — use e2fsck
-        // -----------------------------------------------------------------
         case FilesystemType::EXT4: {
             tool_name = "e2fsck";
             args.push_back("e2fsck");
-            if (repair) {
-                args.push_back("-p");    // automatic repair (preen)
-            } else {
-                args.push_back("-n");    // read-only: answer no to all questions
-            }
-            args.push_back(device_path);
+            args.push_back("-n");    // read-only check
+            args.push_back(partition);
             break;
         }
-
-        // -----------------------------------------------------------------
-        // VFAT — use fsck.vfat (dosfsck)
-        // -----------------------------------------------------------------
         case FilesystemType::VFAT: {
             tool_name = "fsck.vfat";
             args.push_back("fsck.vfat");
-            if (repair) {
-                args.push_back("-a");    // automatically repair
-            } else {
-                args.push_back("-n");    // no write — check only
-            }
-            args.push_back(device_path);
+            args.push_back("-n");    // no write
+            args.push_back(partition);
             break;
         }
-
-        // -----------------------------------------------------------------
-        // SquashFS — read-only, always considered clean
-        // -----------------------------------------------------------------
         case FilesystemType::SquashFS:
-            return Result<bool>::ok(true);
-
-        // -----------------------------------------------------------------
-        // Raw / Unknown — nothing meaningful to check
-        // -----------------------------------------------------------------
         case FilesystemType::Raw:
         case FilesystemType::Unknown:
         default:
-            return Result<bool>::ok(true);
+            return Result<void>::ok();
     }
 
     // ---- Execute the fsck tool ----
-    auto run_result = proc_runner_->run(args, std::chrono::seconds(60));
+    auto run_result = run_process(proc_runner_, args, std::chrono::seconds(60));
     if (run_result.is_err()) {
-        return Result<bool>::err(run_result.take_error());
+        return Result<void>::err(run_result.take_error());
     }
 
     const auto& proc = run_result.value();
 
     if (proc.timed_out) {
-        return Result<bool>::err(make_error(
+        return Result<void>::err(make_error(
             ErrorCode::FILESYSTEM_CHECK_FAILED,
             "Filesystem Check Timed Out",
-            "Filesystem check timed out for " + device_path + " after 60 seconds.",
-            tool_name + " timed out on " + device_path,
+            "Filesystem check timed out for " + partition + " after 60 seconds.",
+            tool_name + " timed out on " + partition,
             true));
     }
 
     if (proc.cancelled) {
-        return Result<bool>::err(make_error(
+        return Result<void>::err(make_error(
             ErrorCode::INTERNAL_CANCELLED,
             "Check Cancelled",
             "Filesystem check was cancelled.",
-            tool_name + " was cancelled for " + device_path,
+            tool_name + " was cancelled for " + partition,
             false));
     }
 
     // ---- Interpret fsck exit code (bitmask per the man page) ----
     int code = proc.exit_code;
 
-    // 0 — No errors
-    if (code == 0) {
-        return Result<bool>::ok(true);
+    // 0 — No errors, or bits 0-1: errors corrected / reboot needed
+    if (code == 0 || (code & 3)) {
+        return Result<void>::ok();
     }
 
     // Bits 2 (code & 4): uncorrected errors remain
     if (code & 4) {
-        // Uncorrected errors — the filesystem is not clean
-        return Result<bool>::ok(false);
-    }
-
-    // Bit 3 and beyond (code >= 8): operational error, usage error, cancelled, etc.
-    // These indicate the *check tool itself* failed, not the filesystem.
-    if (code >= 8) {
-        return Result<bool>::err(make_process_error(
+        return Result<void>::err(make_error(
             ErrorCode::FILESYSTEM_CHECK_FAILED,
-            "Filesystem Check Error",
-            "The filesystem check tool encountered an error on " +
-                device_path + ".",
-            proc, (code & 8) ? true : false));   // operational errors may be retryable
+            "Filesystem Check Failed",
+            "Filesystem check found uncorrected errors on " + partition + ".",
+            tool_name + " exit code " + std::to_string(code),
+            false));
     }
 
-    // Remaining cases: code & 1 (errors corrected) or code & 2 (reboot needed).
-    // The filesystem is clean (or was repaired).
-    return Result<bool>::ok(true);
+    // Bit 3 and beyond: operational error
+    return Result<void>::err(make_process_error(
+        ErrorCode::FILESYSTEM_CHECK_FAILED,
+        "Filesystem Check Error",
+        "The filesystem check tool encountered an error on " + partition + ".",
+        proc, (code & 8) ? true : false));
 }
 
 // =============================================================================
 // is_mounted
 // =============================================================================
 
-Result<bool> FilesystemManager::is_mounted(const std::string& path) {
+bool FilesystemManager::is_mounted(const std::string& path) {
     std::lock_guard<std::mutex> lock(mutex_);
 
     // ---- Strategy 1: parse /proc/mounts ----
-    // Format: device mountpoint fstype options dump pass
     std::ifstream mounts("/proc/mounts");
     if (!mounts.is_open()) {
-        return Result<bool>::err(make_errno_error(
-            ErrorCode::INTERNAL_ERROR,
-            "Cannot Read Mount Table",
-            "Unable to open /proc/mounts to check mount status.",
-            "open(\"/proc/mounts\")",
-            false));
+        return false;
     }
 
     std::string line;
     while (std::getline(mounts, line)) {
-        // Skip empty lines
         if (line.empty()) continue;
 
         std::istringstream iss(line);
         std::string device, mountpoint;
         if (iss >> device >> mountpoint) {
             if (device == path || mountpoint == path) {
-                return Result<bool>::ok(true);
+                return true;
             }
         }
     }
     mounts.close();
 
     // ---- Strategy 2: stat() heuristic ----
-    // If path is a directory on a different device than its parent,
-    // it is very likely a mount point that /proc/mounts may not show
-    // (e.g. certain bind-mount or overlay scenarios).
     struct stat path_stat;
     if (::stat(path.c_str(), &path_stat) == 0) {
-        // Don't check the root filesystem — everything lives on it.
         if (path == "/") {
-            return Result<bool>::ok(false);
+            return false;
         }
 
         std::string parent = parent_directory(path);
@@ -512,12 +503,12 @@ Result<bool> FilesystemManager::is_mounted(const std::string& path) {
         struct stat parent_stat;
         if (::stat(parent.c_str(), &parent_stat) == 0) {
             if (path_stat.st_dev != parent_stat.st_dev) {
-                return Result<bool>::ok(true);
+                return true;
             }
         }
     }
 
-    return Result<bool>::ok(false);
+    return false;
 }
 
 // =============================================================================
@@ -528,7 +519,7 @@ ScopedMount::ScopedMount(IFilesystemManager* fs_mgr,
                          const std::string& device_path,
                          const std::string& mount_point,
                          const std::string& fs_type,
-                         unsigned long mount_flags)
+                         int mount_flags)
     : fs_mgr_(fs_mgr)
     , mount_point_(mount_point)
     , mounted_(false)

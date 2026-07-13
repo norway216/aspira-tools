@@ -48,16 +48,17 @@ Result<void> LoadPackageStep::execute(JobContext& ctx, ProgressCallback progress
     }
 
     auto manifest_result = pkg_mgr_->load_manifest();
-    if (!manifest_result.is_ok()) {
+    if (manifest_result.is_err()) {
         pkg_mgr_->close();
-        return manifest_result;
+        return Result<void>::err(manifest_result.take_error());
     }
+    auto& manifest = manifest_result.value();
 
     // Store manifest in the job context for later steps.
     // We store the manifest data we need directly in ctx fields.
-    logger_->log(LogLevel::Info, step_id(), "manifest_loaded" + std::string(": ") + "package=" + manifest_result.value().package_id + " job=" + ctx.job_id +
-                       " version=" + manifest_result.value().version +
-                       " product=" + manifest_result.value().product);
+    logger_->log(LogLevel::Info, step_id(), "manifest_loaded" + std::string(": ") + "package=" + manifest.package_id + " job=" + ctx.job_id +
+                       " version=" + manifest.version +
+                       " product=" + manifest.product);
 
     if (progress) {
         progress(ProgressInfo{100, "Package loaded successfully", "", 0, 0, 0.0});
@@ -75,11 +76,11 @@ Result<void> LoadPackageStep::verify(JobContext& ctx, ProgressCallback progress,
     }
 
     auto manifest_result = pkg_mgr_->load_manifest();
-    if (!manifest_result.is_ok()) {
-        return manifest_result;
+    if (manifest_result.is_err()) {
+        return Result<void>::err(manifest_result.take_error());
     }
+    auto& m = manifest_result.value();
 
-    const auto& m = manifest_result.value();
     if (m.package_id.empty()) {
         return Result<void>::err(InstallerError::make(
             ErrorCode::PACKAGE_MANIFEST_ERROR,

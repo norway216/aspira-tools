@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cstdio>
 #include <ctime>
+#include <cstring>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -88,19 +89,23 @@ JournalState from_string(const std::string& s) {
 }
 
 json entry_to_json(const JournalEntry& e) {
-    return {
-        {"transaction_id",  e.transaction_id},
-        {"operation",       e.operation},
-        {"state",           to_string(e.state)},
-        {"progress",        e.progress},
-        {"target_device",   e.target_device},
-        {"target_slot",     e.target_slot},
-        {"package_version", e.package_version},
-        {"started_at",      e.started_at},
-        {"last_update_at",  e.last_update_at},
-        {"safe_to_resume",  e.safe_to_resume},
-        {"completed_steps", e.completed_steps}
-    };
+    json j;
+    j["transaction_id"]  = e.transaction_id;
+    j["operation"]       = e.operation;
+    j["state"]           = to_string(e.state);
+    j["progress"]        = e.progress;
+    j["target_device"]   = e.target_device;
+    j["target_slot"]     = e.target_slot;
+    j["package_version"] = e.package_version;
+    j["started_at"]      = e.started_at;
+    j["last_update_at"]  = e.last_update_at;
+    j["safe_to_resume"]  = e.safe_to_resume;
+    json steps = json::array();
+    for (const auto& s : e.completed_steps) {
+        steps.push_back(s);
+    }
+    j["completed_steps"] = steps;
+    return j;
 }
 
 JournalEntry entry_from_json(const json& j) {
@@ -117,7 +122,7 @@ JournalEntry entry_from_json(const json& j) {
     e.safe_to_resume   = j.value("safe_to_resume", true);
     if (j.contains("completed_steps") && j["completed_steps"].is_array()) {
         for (const auto& s : j["completed_steps"])
-            e.completed_steps.push_back(s.get<std::string>());
+            e.completed_steps.push_back(s.value("", ""));
     }
     return e;
 }

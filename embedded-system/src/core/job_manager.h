@@ -27,7 +27,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include <nlohmann/json_fwd.hpp>
+#include <nlohmann/json.hpp>
 
 namespace installer {
 

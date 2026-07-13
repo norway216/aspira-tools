@@ -23,15 +23,14 @@ public:
     ~ProcessRunner() override = default;
 
     Result<ProcessResult> run(
-        const std::vector<std::string>& args,
-        std::chrono::milliseconds timeout,
-        const CancellationToken* token = nullptr) override;
+        const ProcessArgs& args,
+        CancellationToken& token) override;
 
     Result<ProcessResult> run_with_input(
         const std::vector<std::string>& args,
         const std::string& stdin_data,
         std::chrono::milliseconds timeout,
-        const CancellationToken* token = nullptr) override;
+        const CancellationToken* token = nullptr);
 
 private:
     /**

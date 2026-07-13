@@ -61,6 +61,8 @@ struct PipePair {
         if (write_end >= 0) ::close(write_end);
     }
 
+    PipePair() = default;
+
     // Non-copyable, non-movable (simple stack-based lifetime)
     PipePair(const PipePair&) = delete;
     PipePair& operator=(const PipePair&) = delete;
@@ -495,10 +497,15 @@ Result<ProcessResult> ProcessRunner::run_impl(
 // =============================================================================
 
 Result<ProcessResult> ProcessRunner::run(
-    const std::vector<std::string>& args,
-    std::chrono::milliseconds timeout,
-    const CancellationToken* token) {
-    return run_impl(args, nullptr, timeout, token);
+    const ProcessArgs& args,
+    CancellationToken& token) {
+    // Build the full argument vector: program + user args.
+    std::vector<std::string> full_args;
+    full_args.reserve(1 + args.args.size());
+    full_args.push_back(args.program);
+    full_args.insert(full_args.end(), args.args.begin(), args.args.end());
+
+    return run_impl(full_args, nullptr, args.timeout, &token);
 }
 
 Result<ProcessResult> ProcessRunner::run_with_input(

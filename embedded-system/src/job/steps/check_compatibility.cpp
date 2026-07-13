@@ -35,26 +35,26 @@ Result<void> CheckCompatibilityStep::execute(JobContext& ctx, ProgressCallback p
     }
 
     auto manifest_result = pkg_mgr_->load_manifest();
-    if (!manifest_result.is_ok()) {
-        return manifest_result;
+    if (manifest_result.is_err()) {
+        return Result<void>::err(manifest_result.take_error());
     }
-
-    const auto& manifest = manifest_result.value();
+    auto& manifest = manifest_result.value();
 
     // Check hardware profile compatibility.
     auto dev_info = dev_mgr_->get_device_info(ctx.target_device);
-    if (!dev_info.is_ok()) {
-        return dev_info;
+    if (dev_info.is_err()) {
+        return Result<void>::err(dev_info.take_error());
     }
+    auto& info = dev_info.value();
 
     // Validate minimum disk size.
-    if (dev_info.value().size_bytes < manifest.min_disk_size_bytes) {
+    if (info.size_bytes < manifest.min_disk_size_bytes) {
         return Result<void>::err(InstallerError::make(
             ErrorCode::DEVICE_CAPACITY_LOW,
             "Insufficient Disk Space",
             "The target device does not meet the minimum size requirement",
             "device=" + ctx.target_device +
-            " size=" + std::to_string(dev_info.value().size_bytes) +
+            " size=" + std::to_string(info.size_bytes) +
             " required=" + std::to_string(manifest.min_disk_size_bytes),
             false));
     }

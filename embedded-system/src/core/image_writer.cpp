@@ -272,14 +272,14 @@ void ImageWriter::set_chunk_size(size_t bytes) {
 // open_device_direct
 // =========================================================================
 
-Result<int> ImageWriter::open_device_direct(const std::string& device_path) {
-    int fd = open(device_path.c_str(), O_WRONLY | O_DIRECT | O_SYNC);
+Result<int> ImageWriter::open_device_direct(const std::string& target_device) {
+    int fd = open(target_device.c_str(), O_WRONLY | O_DIRECT | O_SYNC);
     if (fd < 0) {
         return Result<int>::err(InstallerError::make(
             ErrorCode::DEVICE_IO_ERROR,
             "Device Open Error",
             "Failed to open block device for writing",
-            "device=" + device_path + " errno=" + std::to_string(errno),
+            "device=" + target_device + " errno=" + std::to_string(errno),
             true));  // retryable
     }
     return Result<int>::ok(fd);
@@ -319,7 +319,7 @@ Result<void> ImageWriter::flush_device(int fd) {
 // sha256_hex_string
 // =========================================================================
 
-std::string ImageWriter::sha256_hex_string(SHA256Context& ctx) {
+static std::string sha256_hex_string(SHA256Context& ctx) {
     uint8_t hash[32];
     sha256_final(&ctx, hash);
 
@@ -335,11 +335,11 @@ std::string ImageWriter::sha256_hex_string(SHA256Context& ctx) {
 // write — High-concurrency producer-consumer pipeline
 // =========================================================================
 
-Result<void> ImageWriter::write(const std::string& device_path,
-                                 std::istream& source,
-                                 const std::string& expected_sha256,
-                                 const CancellationToken& cancel,
-                                 ProgressCallback progress) {
+Result<void> ImageWriter::write(std::istream& source_stream,
+                                 const std::string& target_device,
+                                 const WriteOptions& options,
+                                 ProgressCallback callback,
+                                 CancellationToken& token) {
     // ---- Pipeline shared state ----
 
     // Capacity of 8 chunks allows reasonable pipelining (~32 MiB in flight
@@ -376,13 +376,13 @@ Result<void> ImageWriter::write(const std::string& device_path,
     ScopedThread reader_thread([&]() {
         size_t chunk_index = 0;
 
-        while (!cancel.is_cancelled() && !pipeline_error.load(std::memory_order_acquire)) {
+        while (!token.is_cancelled() && !pipeline_error.load(std::memory_order_acquire)) {
             DataChunk chunk;
-            chunk.data.resize(chunk_size_);
+            chunk.data.resize(options.buffer_size);
 
-            source.read(reinterpret_cast<char*>(chunk.data.data()),
-                        static_cast<std::streamsize>(chunk_size_));
-            size_t bytes_read = static_cast<size_t>(source.gcount());
+            source_stream.read(reinterpret_cast<char*>(chunk.data.data()),
+                        static_cast<std::streamsize>(options.buffer_size));
+            size_t bytes_read = static_cast<size_t>(source_stream.gcount());
 
             if (bytes_read == 0) {
                 break;  // EOF or error
@@ -392,7 +392,7 @@ Result<void> ImageWriter::write(const std::string& device_path,
             chunk.chunk_index = chunk_index++;
 
             // Determine whether this is the final chunk.
-            if (bytes_read < chunk_size_) {
+            if (bytes_read < options.buffer_size) {
                 // Partial read always means EOF.
                 chunk.is_last = true;
             } else {
@@ -400,8 +400,8 @@ Result<void> ImageWriter::write(const std::string& device_path,
                 // We use get()+unget() instead of peek() because unget() is
                 // guaranteed by the standard for a single character.
                 char probe = 0;
-                if (source.get(probe)) {
-                    source.unget();   // Put the byte back — more data remains.
+                if (source_stream.get(probe)) {
+                    source_stream.unget();   // Put the byte back — more data remains.
                 } else {
                     chunk.is_last = true;  // EOF reached.
                 }
@@ -409,14 +409,14 @@ Result<void> ImageWriter::write(const std::string& device_path,
                 // call on the final chunk (which will be empty) behaves
                 // correctly.
                 if (chunk.is_last) {
-                    source.clear();
+                    source_stream.clear();
                 }
             }
 
             // Check cancellation / error before blocking on push.
             // If we proceed into a blocking push after cancellation has been
             // requested, we may never wake up unless the queue is closed.
-            if (cancel.is_cancelled() || pipeline_error.load(std::memory_order_acquire)) {
+            if (token.is_cancelled() || pipeline_error.load(std::memory_order_acquire)) {
                 queue.close();
                 break;
             }
@@ -440,7 +440,7 @@ Result<void> ImageWriter::write(const std::string& device_path,
     // =====================================================================
     ScopedThread writer_thread([&]() {
         // Open the block device with O_DIRECT | O_SYNC.
-        auto fd_result = open_device_direct(device_path);
+        auto fd_result = open_device_direct(target_device);
         if (!fd_result.is_ok()) {
             set_error(fd_result.take_error());
             queue.close();
@@ -455,7 +455,7 @@ Result<void> ImageWriter::write(const std::string& device_path,
         // The buffer is sized to hold one chunk plus up to 511 bytes of
         // zero-padding for the last chunk.
         constexpr size_t kBlockAlign = 512;
-        size_t aligned_buf_size = ((chunk_size_ + kBlockAlign - 1) / kBlockAlign) * kBlockAlign;
+        size_t aligned_buf_size = ((options.buffer_size + kBlockAlign - 1) / kBlockAlign) * kBlockAlign;
         void* aligned_raw = nullptr;
         if (posix_memalign(&aligned_raw, 4096, aligned_buf_size) != 0) {
             close(fd);
@@ -475,7 +475,7 @@ Result<void> ImageWriter::write(const std::string& device_path,
             // Check cancellation / error before blocking on pop.
             // If we proceed into a blocking pop after cancellation has been
             // requested, we may never wake up unless the queue is closed.
-            if (cancel.is_cancelled() || pipeline_error.load(std::memory_order_acquire)) {
+            if (token.is_cancelled() || pipeline_error.load(std::memory_order_acquire)) {
                 queue.close();
                 break;
             }
@@ -484,7 +484,7 @@ Result<void> ImageWriter::write(const std::string& device_path,
             }
             // Double-check after receiving a chunk — cancellation may have
             // been requested while we were blocked in pop().
-            if (cancel.is_cancelled() || pipeline_error.load(std::memory_order_acquire)) {
+            if (token.is_cancelled() || pipeline_error.load(std::memory_order_acquire)) {
                 break;
             }
 
@@ -505,7 +505,7 @@ Result<void> ImageWriter::write(const std::string& device_path,
             // --- Write at the correct offset using pwrite() ---
             // pwrite() does not update the file offset, which avoids
             // seeking issues with O_DIRECT.
-            off_t offset = static_cast<off_t>(chunk.chunk_index) * static_cast<off_t>(chunk_size_);
+            off_t offset = static_cast<off_t>(chunk.chunk_index) * static_cast<off_t>(options.buffer_size);
 
             size_t total_written = 0;
             while (total_written < write_size) {
@@ -523,7 +523,7 @@ Result<void> ImageWriter::write(const std::string& device_path,
                     if (errno == EINVAL && chunk.is_last) {
                         // Close the O_DIRECT fd and re-open without O_DIRECT.
                         close(fd);
-                        fd = open(device_path.c_str(), O_WRONLY | O_SYNC);
+                        fd = open(target_device.c_str(), O_WRONLY | O_SYNC);
                         if (fd < 0) {
                             free(write_buf);
                             set_error(InstallerError::make(
@@ -568,7 +568,7 @@ Result<void> ImageWriter::write(const std::string& device_path,
             total_bytes_written.store(local_bytes_written, std::memory_order_release);
 
             // --- Progress reporting ---
-            if (progress) {
+            if (callback) {
                 auto now = std::chrono::steady_clock::now();
                 double elapsed =
                     std::chrono::duration<double>(now - write_start).count();
@@ -579,7 +579,7 @@ Result<void> ImageWriter::write(const std::string& device_path,
                 info.speed_bytes_per_sec =
                     (elapsed > 0.0) ? static_cast<double>(local_bytes_written) / elapsed : 0.0;
                 info.step_description = "Writing image to device";
-                progress(info);
+                callback(info);
             }
 
             if (chunk.is_last) {
@@ -614,13 +614,13 @@ Result<void> ImageWriter::write(const std::string& device_path,
         {
             std::unique_lock<std::mutex> lock(writer_done_mutex);
             while (!writer_done &&
-                   !cancel.is_cancelled() &&
+                   !token.is_cancelled() &&
                    !pipeline_error.load(std::memory_order_acquire)) {
                 writer_done_cv.wait_for(lock, std::chrono::milliseconds(100));
             }
         }
 
-        if (cancel.is_cancelled() || pipeline_error.load(std::memory_order_acquire)) {
+        if (token.is_cancelled() || pipeline_error.load(std::memory_order_acquire)) {
             return;
         }
 
@@ -631,18 +631,18 @@ Result<void> ImageWriter::write(const std::string& device_path,
             SHA256Context ctx;
             sha256_init(&ctx);
             std::string actual = sha256_hex_string(ctx);
-            if (actual != expected_sha256) {
+            if (actual != options.expected_sha256) {
                 set_error(InstallerError::make(
                     ErrorCode::IMAGE_VERIFY_FAILED,
                     "Hash Mismatch",
                     "Written data hash does not match expected hash",
-                    "expected=" + expected_sha256 + " actual=" + actual));
+                    "expected=" + options.expected_sha256 + " actual=" + actual));
             }
             return;
         }
 
         // --- Open the device for read-back ---
-        int fd = open(device_path.c_str(), O_RDONLY);
+        int fd = open(target_device.c_str(), O_RDONLY);
         if (fd < 0) {
             set_error(InstallerError::make(
                 ErrorCode::DEVICE_IO_ERROR,
@@ -660,9 +660,9 @@ Result<void> ImageWriter::write(const std::string& device_path,
         uint64_t bytes_read = 0;
         auto verify_start = std::chrono::steady_clock::now();
 
-        while (bytes_read < total && !cancel.is_cancelled()) {
+        while (bytes_read < total && !token.is_cancelled()) {
             size_t to_read = static_cast<size_t>(
-                std::min(static_cast<uint64_t>(chunk_size_), total - bytes_read));
+                std::min(static_cast<uint64_t>(options.buffer_size), total - bytes_read));
 
             ssize_t n = read(fd, read_buf.data(), to_read);
             if (n < 0) {
@@ -694,7 +694,7 @@ Result<void> ImageWriter::write(const std::string& device_path,
             bytes_read += static_cast<uint64_t>(n);
 
             // --- Progress reporting ---
-            if (progress) {
+            if (callback) {
                 auto now = std::chrono::steady_clock::now();
                 double elapsed =
                     std::chrono::duration<double>(now - verify_start).count();
@@ -705,24 +705,24 @@ Result<void> ImageWriter::write(const std::string& device_path,
                 info.speed_bytes_per_sec =
                     (elapsed > 0.0) ? static_cast<double>(bytes_read) / elapsed : 0.0;
                 info.step_description = "Verifying written data";
-                progress(info);
+                callback(info);
             }
         }
 
         close(fd);
 
-        if (cancel.is_cancelled()) {
+        if (token.is_cancelled()) {
             return;
         }
 
         // --- Finalize and compare ---
         std::string actual_hash = sha256_hex_string(sha_ctx);
-        if (actual_hash != expected_sha256) {
+        if (actual_hash != options.expected_sha256) {
             set_error(InstallerError::make(
                 ErrorCode::IMAGE_VERIFY_FAILED,
                 "Hash Mismatch",
                 "Written data hash does not match expected hash",
-                "expected=" + expected_sha256 + " actual=" + actual_hash));
+                "expected=" + options.expected_sha256 + " actual=" + actual_hash));
         }
     });
 
@@ -731,7 +731,7 @@ Result<void> ImageWriter::write(const std::string& device_path,
         return Result<void>::err(std::move(*first_error));
     }
 
-    if (cancel.is_cancelled()) {
+    if (token.is_cancelled()) {
         return Result<void>::err(InstallerError::make(
             ErrorCode::INTERNAL_CANCELLED,
             "Operation Cancelled",
@@ -745,18 +745,18 @@ Result<void> ImageWriter::write(const std::string& device_path,
 // verify — Standalone device verification
 // =========================================================================
 
-Result<bool> ImageWriter::verify(const std::string& device_path,
+Result<void> ImageWriter::verify(const std::string& target_device,
                                   const std::string& expected_sha256,
-                                  uint64_t size_bytes,
-                                  const CancellationToken& cancel,
-                                  ProgressCallback progress) {
-    int fd = open(device_path.c_str(), O_RDONLY);
+                                  uint64_t expected_size,
+                                  ProgressCallback callback,
+                                  CancellationToken& token) {
+    int fd = open(target_device.c_str(), O_RDONLY);
     if (fd < 0) {
-        return Result<bool>::err(InstallerError::make(
+        return Result<void>::err(InstallerError::make(
             ErrorCode::DEVICE_IO_ERROR,
             "Device Open Error",
             "Failed to open device for verification",
-            "device=" + device_path + " errno=" + std::to_string(errno)));
+            "device=" + target_device + " errno=" + std::to_string(errno)));
     }
 
     SHA256Context sha_ctx;
@@ -766,9 +766,9 @@ Result<bool> ImageWriter::verify(const std::string& device_path,
     uint64_t bytes_read = 0;
     auto start_time = std::chrono::steady_clock::now();
 
-    while (bytes_read < size_bytes && !cancel.is_cancelled()) {
+    while (bytes_read < expected_size && !token.is_cancelled()) {
         size_t to_read = static_cast<size_t>(
-            std::min(static_cast<uint64_t>(chunk_size_), size_bytes - bytes_read));
+            std::min(static_cast<uint64_t>(chunk_size_), expected_size - bytes_read));
 
         ssize_t n = read(fd, read_buf.data(), to_read);
         if (n < 0) {
@@ -776,7 +776,7 @@ Result<bool> ImageWriter::verify(const std::string& device_path,
                 continue;
             }
             close(fd);
-            return Result<bool>::err(InstallerError::make(
+            return Result<void>::err(InstallerError::make(
                 ErrorCode::DEVICE_IO_ERROR,
                 "Read Error",
                 "Failed to read from device during verification",
@@ -790,26 +790,26 @@ Result<bool> ImageWriter::verify(const std::string& device_path,
         sha256_update(&sha_ctx, read_buf.data(), static_cast<size_t>(n));
         bytes_read += static_cast<uint64_t>(n);
 
-        if (progress) {
+        if (callback) {
             auto now = std::chrono::steady_clock::now();
             double elapsed = std::chrono::duration<double>(now - start_time).count();
             ProgressInfo info;
             info.bytes_processed = bytes_read;
-            info.bytes_total = size_bytes;
-            info.percent = (size_bytes > 0)
-                               ? static_cast<int>(bytes_read * 100 / size_bytes)
+            info.bytes_total = expected_size;
+            info.percent = (expected_size > 0)
+                               ? static_cast<int>(bytes_read * 100 / expected_size)
                                : 100;
             info.speed_bytes_per_sec =
                 (elapsed > 0.0) ? static_cast<double>(bytes_read) / elapsed : 0.0;
             info.step_description = "Verifying device data";
-            progress(info);
+            callback(info);
         }
     }
 
     close(fd);
 
-    if (cancel.is_cancelled()) {
-        return Result<bool>::err(InstallerError::make(
+    if (token.is_cancelled()) {
+        return Result<void>::err(InstallerError::make(
             ErrorCode::INTERNAL_CANCELLED,
             "Operation Cancelled",
             "Verification was cancelled by user request"));
@@ -821,8 +821,14 @@ Result<bool> ImageWriter::verify(const std::string& device_path,
 
     // Both hex strings should be lower-case for a case-sensitive comparison.
     // The hex output from sha256_hex_string is always lower-case.
-    bool matches = (actual_hash == expected_sha256);
-    return Result<bool>::ok(matches);
+    if (actual_hash != expected_sha256) {
+        return Result<void>::err(InstallerError::make(
+            ErrorCode::IMAGE_VERIFY_FAILED,
+            "Hash Mismatch",
+            "Device data hash does not match expected hash",
+            "expected=" + expected_sha256 + " actual=" + actual_hash));
+    }
+    return Result<void>::ok();
 }
 
 } // namespace installer

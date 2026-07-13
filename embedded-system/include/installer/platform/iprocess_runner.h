@@ -60,10 +60,10 @@ struct ProcessResult {
     int exit_code = 0;
 
     /** Captured standard output (stdout). */
-    std::string stdout_output;
+    std::string stdout_data;
 
     /** Captured standard error (stderr). */
-    std::string stderr_output;
+    std::string stderr_data;
 
     /** True if the process was terminated because its timeout expired. */
     bool timed_out = false;

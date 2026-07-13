@@ -47,71 +47,38 @@ Result<void> PreparePartitionsStep::execute(JobContext& ctx, ProgressCallback pr
             "Partition creation cancelled"));
     }
 
-    // Create GPT partition table.
-    auto table_result = part_mgr_->create_partition_table(ctx.target_device, "gpt");
-    if (!table_result.is_ok()) {
-        return table_result;
-    }
+    // Build the complete partition layout for A/B update scheme.
+    // Sizes in MiB: boot=512, recovery=4096, kernel_a=256, kernel_b=256,
+    //               rootfs_a=6144, rootfs_b=6144, config=1024, data=remaining
+    PartitionLayout layout;
+    layout.table_type = "gpt";
 
-    if (progress) {
-        progress(ProgressInfo{40, "Creating boot partition...", "", 0, 0, 0.0});
-    }
-
-    // Create standard partitions for A/B layout.
-    // Partition sizes in MiB: boot=512, recovery=4096, kernel_a=256, kernel_b=256,
-    //                        rootfs_a=6144, rootfs_b=6144, config=1024, data=remaining
-
-    auto create_part = [&](const std::string& name, uint64_t size_mib, const std::string& label) -> Result<void> {
-        if (cancel.is_cancelled()) {
-            return Result<void>::err(InstallerError::make(
-                ErrorCode::INTERNAL_CANCELLED, "Cancelled",
-                "Partition creation cancelled during " + name));
-        }
-        return part_mgr_->create_partition(ctx.target_device, name, size_mib, label);
+    auto add_part = [&](const std::string& name, uint64_t size_mib,
+                        const std::string& label, FilesystemType fs) {
+        PartitionSpec spec;
+        spec.name = name;
+        spec.size_mib = size_mib;
+        spec.label = label;
+        spec.filesystem = fs;
+        layout.partitions.push_back(std::move(spec));
     };
 
-    // Create partitions in order.
-    auto r = create_part("boot", 512, "BOOT");
-    if (!r.is_ok()) return r;
-
-    r = create_part("recovery", 4096, "RECOVERY");
-    if (!r.is_ok()) return r;
-
-    r = create_part("kernel_a", 256, "KERNEL_A");
-    if (!r.is_ok()) return r;
-
-    r = create_part("kernel_b", 256, "KERNEL_B");
-    if (!r.is_ok()) return r;
-
-    r = create_part("rootfs_a", 6144, "ROOT_A");
-    if (!r.is_ok()) return r;
+    add_part("boot", 512, "BOOT", FilesystemType::VFAT);
+    add_part("recovery", 4096, "RECOVERY", FilesystemType::EXT4);
+    add_part("kernel_a", 256, "KERNEL_A", FilesystemType::Raw);
+    add_part("kernel_b", 256, "KERNEL_B", FilesystemType::Raw);
+    add_part("rootfs_a", 6144, "ROOT_A", FilesystemType::EXT4);
+    add_part("rootfs_b", 6144, "ROOT_B", FilesystemType::EXT4);
+    add_part("config", 1024, "CONFIG", FilesystemType::EXT4);
+    add_part("data", 0, "DATA", FilesystemType::EXT4);   // 0 = fill remaining
 
     if (progress) {
-        progress(ProgressInfo{60, "Creating rootfs_b partition...", "", 0, 0, 0.0});
+        progress(ProgressInfo{50, "Writing partition table...", "", 0, 0, 0.0});
     }
 
-    r = create_part("rootfs_b", 6144, "ROOT_B");
-    if (!r.is_ok()) return r;
-
-    r = create_part("config", 1024, "CONFIG");
-    if (!r.is_ok()) return r;
-
-    if (progress) {
-        progress(ProgressInfo{80, "Creating data partition...", "", 0, 0, 0.0});
-    }
-
-    // data partition fills remaining space (size_mib=0).
-    r = create_part("data", 0, "DATA");
-    if (!r.is_ok()) return r;
-
-    // Reread partition table so kernel knows about new partitions.
-    if (progress) {
-        progress(ProgressInfo{90, "Rereading partition table...", "", 0, 0, 0.0});
-    }
-
-    auto reread_result = part_mgr_->reread_partition_table(ctx.target_device);
-    if (!reread_result.is_ok()) {
-        logger_->log(LogLevel::Warn, step_id(), "reread_failed" + std::string(": ") + "Failed to reread partition table; may need reboot", ctx.job_id);
+    auto table_result = part_mgr_->create_partition_table(ctx.target_device, layout);
+    if (!table_result.is_ok()) {
+        return table_result;
     }
 
     if (progress) {
@@ -135,7 +102,7 @@ Result<void> PreparePartitionsStep::verify(JobContext& ctx, ProgressCallback pro
     }
 
     // Verify partitions exist by trying to find them.
-    auto boot_result = part_mgr_->find_partition(ctx.target_device, "boot");
+    auto boot_result = part_mgr_->get_partition_by_label(ctx.target_device, "boot");
     if (!boot_result.is_ok()) {
         return Result<void>::err(InstallerError::make(
             ErrorCode::PARTITION_NOT_FOUND,

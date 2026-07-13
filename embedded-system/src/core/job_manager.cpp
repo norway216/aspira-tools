@@ -12,6 +12,7 @@
 
 #include "src/core/job_manager.h"
 #include "src/journal/transaction_journal.h"
+#include <iomanip>
 
 #include "installer/IJob.h"
 #include "installer/ITransactionJournal.h"

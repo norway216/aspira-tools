@@ -10,7 +10,7 @@
 #define INSTALLER_CLI_COMMANDS_H
 
 #include "installer/IIPCClient.h"
-#include "installer/ILogger.h"
+#include "installer/log/ilogger.h"
 #include "installer/core/result.h"
 #include <memory>
 #include <string>

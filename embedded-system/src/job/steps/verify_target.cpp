@@ -31,11 +31,10 @@ Result<void> VerifyTargetStep::execute(JobContext& ctx, ProgressCallback progres
     logger_->log(LogLevel::Info, step_id(), "execute" + std::string(": ") + "Verifying all installed partitions", ctx.job_id);
 
     auto manifest_result = pkg_mgr_->load_manifest();
-    if (!manifest_result.is_ok()) {
-        return manifest_result;
+    if (manifest_result.is_err()) {
+        return Result<void>::err(manifest_result.take_error());
     }
-
-    const auto& manifest = manifest_result.value();
+    auto& manifest = manifest_result.value();
     const auto& payloads = manifest.payloads;
 
     if (payloads.empty()) {
@@ -71,7 +70,7 @@ Result<void> VerifyTargetStep::execute(JobContext& ctx, ProgressCallback progres
         }
 
         // Look up the partition.
-        auto part_result = part_mgr_->find_partition(ctx.target_device, part_name);
+        auto part_result = part_mgr_->get_partition_by_label(ctx.target_device, part_name);
         if (!part_result.is_ok()) {
             logger_->log(LogLevel::Warn, step_id(), "partition_not_found" + std::string(": ") + "Cannot verify " + payload.name +
                                ": partition " + part_name + " not found", ctx.job_id);
@@ -120,7 +119,7 @@ Result<void> VerifyTargetStep::execute(JobContext& ctx, ProgressCallback progres
                 "Filesystem check cancelled"));
         }
 
-        auto part_result = part_mgr_->find_partition(ctx.target_device, part_name);
+        auto part_result = part_mgr_->get_partition_by_label(ctx.target_device, part_name);
         if (part_result.is_ok()) {
             auto check_result = fs_mgr_->check(part_result.value());
             if (!check_result.is_ok()) {

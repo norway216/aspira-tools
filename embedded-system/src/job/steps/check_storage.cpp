@@ -35,11 +35,10 @@ Result<void> CheckStorageStep::execute(JobContext& ctx, ProgressCallback progres
     }
 
     auto dev_info = dev_mgr_->get_device_info(ctx.target_device);
-    if (!dev_info.is_ok()) {
-        return dev_info;
+    if (dev_info.is_err()) {
+        return Result<void>::err(dev_info.take_error());
     }
-
-    const auto& info = dev_info.value();
+    auto& info = dev_info.value();
 
     if (progress) {
         progress(ProgressInfo{40, "Computing required space...", "", 0, 0, 0.0});
@@ -47,12 +46,13 @@ Result<void> CheckStorageStep::execute(JobContext& ctx, ProgressCallback progres
 
     // Sum up the total payload size from the manifest.
     auto manifest_result = pkg_mgr_->load_manifest();
-    if (!manifest_result.is_ok()) {
-        return manifest_result;
+    if (manifest_result.is_err()) {
+        return Result<void>::err(manifest_result.take_error());
     }
+    auto& manifest = manifest_result.value();
 
     uint64_t total_required = 0;
-    for (const auto& payload : manifest_result.value().payloads) {
+    for (const auto& payload : manifest.payloads) {
         total_required += payload.uncompressed_size > 0
                           ? payload.uncompressed_size
                           : payload.size;
@@ -98,11 +98,12 @@ Result<void> CheckStorageStep::verify(JobContext& ctx, ProgressCallback progress
 
     // Re-verify the device is still accessible and its capacity.
     auto dev_info = dev_mgr_->get_device_info(ctx.target_device);
-    if (!dev_info.is_ok()) {
-        return dev_info;
+    if (dev_info.is_err()) {
+        return Result<void>::err(dev_info.take_error());
     }
+    auto& info = dev_info.value();
 
-    if (dev_info.value().size_bytes == 0) {
+    if (info.size_bytes == 0) {
         return Result<void>::err(InstallerError::make(
             ErrorCode::DEVICE_CAPACITY_LOW,
             "Device Size Invalid",
