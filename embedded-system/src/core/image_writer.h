@@ -145,7 +145,6 @@ private:
     static std::string sha256_hex_string(SHA256Context& ctx);
 
     size_t chunk_size_ = 4 * 1024 * 1024; // 4 MiB default
-    std::mutex write_mutex_;
 };
 
 // =========================================================================

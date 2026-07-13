@@ -205,19 +205,19 @@ Result<void> BaseJob::run_chain(JobContext& ctx, CancellationToken& cancel) {
 
         // ---- 2. Check if step already completed in journal ----
         if (is_step_done(step->step_id())) {
-            logger_->log(LogLevel::Info, "BaseJob", "skip_step" + std::string(": ") + "step=" + step->step_id(, job_id_) + " (already completed)");
+            logger_->log(LogLevel::Info, "BaseJob", "skip_step" + std::string(": ") + "step=" + step->step_id() + " job=" + job_id_ + " (already completed)");
             cumulative_weight += step->weight_percent();
             update_overall_progress(i);
             continue;
         }
 
-        logger_->log(LogLevel::Info, "BaseJob", "begin_step" + std::string(": ") + "step=" + step->step_id(, job_id_) + " desc=" + step->description());
+        logger_->log(LogLevel::Info, "BaseJob", "begin_step" + std::string(": ") + "step=" + step->step_id() + " job=" + job_id_ + " desc=" + step->description());
 
         // ---- 3. Prepare ----
         {
             auto result = step->prepare(ctx);
             if (!result.is_ok()) {
-                logger_->log(LogLevel::Error, "BaseJob", "step_prepare_failed" + std::string(": ") + "step=" + step->step_id(, job_id_) +
+                logger_->log(LogLevel::Error, "BaseJob", "step_prepare_failed" + std::string(": ") + "step=" + step->step_id() + " job=" + job_id_ +
                                    " error=" + result.error().code);
                 log_state_transition(JobState::Running, JobState::Failed);
                 state_.store(JobState::Failed, std::memory_order_release);
@@ -250,7 +250,9 @@ Result<void> BaseJob::run_chain(JobContext& ctx, CancellationToken& cancel) {
 
             auto journal_result = static_cast<TransactionJournal*>(ctx.journal)->update_state(job_id_, js, progress_.load());
             if (!journal_result.is_ok()) {
-                logger_->log(LogLevel::Error, "BaseJob", "journal_update_failed" + std::string(": ") + "step=" + step->step_id(, job_id_));
+                logger_->log(LogLevel::Error, "BaseJob", "journal_update_failed" + std::string(": ") + "step=" + step->step_id() + " job=" + job_id_);
+                state_.store(JobState::Failed, std::memory_order_release);
+                return Result<void>::err(journal_result.take_error());
             }
         }
 
@@ -278,13 +280,13 @@ Result<void> BaseJob::run_chain(JobContext& ctx, CancellationToken& cancel) {
 
             auto result = step->execute(ctx, progress_wrapper, cancel);
             if (!result.is_ok()) {
-                logger_->log(LogLevel::Error, "BaseJob", "step_execute_failed" + std::string(": ") + "step=" + step->step_id(, job_id_) +
+                logger_->log(LogLevel::Error, "BaseJob", "step_execute_failed" + std::string(": ") + "step=" + step->step_id() + " job=" + job_id_ +
                                    " error=" + result.error().code);
 
                 // Attempt rollback (best-effort).
                 auto rb_result = step->rollback(ctx);
                 if (!rb_result.is_ok()) {
-                    logger_->log(LogLevel::Warn, "BaseJob", "step_rollback_failed" + std::string(": ") + "step=" + step->step_id(, job_id_));
+                    logger_->log(LogLevel::Warn, "BaseJob", "step_rollback_failed" + std::string(": ") + "step=" + step->step_id() + " job=" + job_id_);
                 }
 
                 log_state_transition(JobState::Running, JobState::Failed);
@@ -297,12 +299,12 @@ Result<void> BaseJob::run_chain(JobContext& ctx, CancellationToken& cancel) {
         {
             auto result = step->verify(ctx, progress_callback_, cancel);
             if (!result.is_ok()) {
-                logger_->log(LogLevel::Error, "BaseJob", "step_verify_failed" + std::string(": ") + "step=" + step->step_id(, job_id_) +
+                logger_->log(LogLevel::Error, "BaseJob", "step_verify_failed" + std::string(": ") + "step=" + step->step_id() + " job=" + job_id_ +
                                    " error=" + result.error().code);
 
                 auto rb_result = step->rollback(ctx);
                 if (!rb_result.is_ok()) {
-                    logger_->log(LogLevel::Warn, "BaseJob", "step_rollback_failed" + std::string(": ") + "step=" + step->step_id(, job_id_));
+                    logger_->log(LogLevel::Warn, "BaseJob", "step_rollback_failed" + std::string(": ") + "step=" + step->step_id() + " job=" + job_id_);
                 }
 
                 log_state_transition(JobState::Running, JobState::Failed);
@@ -316,7 +318,9 @@ Result<void> BaseJob::run_chain(JobContext& ctx, CancellationToken& cancel) {
             auto journal_result = static_cast<TransactionJournal*>(ctx.journal)->mark_step_complete(
                 job_id_, step->step_id());
             if (!journal_result.is_ok()) {
-                logger_->log(LogLevel::Error, "BaseJob", "journal_mark_failed" + std::string(": ") + "step=" + step->step_id(, job_id_));
+                logger_->log(LogLevel::Error, "BaseJob", "journal_mark_failed" + std::string(": ") + "step=" + step->step_id() + " job=" + job_id_);
+                state_.store(JobState::Failed, std::memory_order_release);
+                return Result<void>::err(journal_result.take_error());
             }
         }
 
@@ -324,7 +328,7 @@ Result<void> BaseJob::run_chain(JobContext& ctx, CancellationToken& cancel) {
         cumulative_weight += step->weight_percent();
         update_overall_progress(i);
 
-        logger_->log(LogLevel::Info, "BaseJob", "complete_step" + std::string(": ") + "step=" + step->step_id(, job_id_));
+        logger_->log(LogLevel::Info, "BaseJob", "complete_step" + std::string(": ") + "step=" + step->step_id() + " job=" + job_id_);
     }
 
     // All steps completed successfully.
@@ -337,6 +341,8 @@ Result<void> BaseJob::run_chain(JobContext& ctx, CancellationToken& cancel) {
         auto commit_result = ctx.journal->commit(job_id_);
         if (!commit_result.is_ok()) {
             logger_->log(LogLevel::Error, "BaseJob", "journal_commit_failed" + std::string(": ") + "Transaction commit failed", job_id_);
+            state_.store(JobState::Failed, std::memory_order_release);
+            return Result<void>::err(commit_result.take_error());
         }
     }
 
@@ -368,7 +374,7 @@ void BaseJob::log_state_transition(JobState from, JobState to) {
         std::ostringstream oss;
         oss << "State transition: " << job_state_name(from)
             << " -> " << job_state_name(to);
-        logger_->log(LogLevel::Info, "BaseJob", "state_transition" + std::string(": ") + oss.str(, job_id_));
+        logger_->log(LogLevel::Info, "BaseJob", "state_transition" + std::string(": ") + oss.str() + " job=" + job_id_);
     }
 }
 

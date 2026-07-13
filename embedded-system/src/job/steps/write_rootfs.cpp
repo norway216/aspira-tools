@@ -1,5 +1,8 @@
 #include "src/job/steps/write_rootfs.h"
 
+#include <cstdio>
+#include <fstream>
+
 namespace installer {
 
 WriteRootfsStep::WriteRootfsStep(std::shared_ptr<IImageWriter> image_writer,
@@ -37,7 +40,7 @@ Result<void> WriteRootfsStep::prepare(JobContext& ctx) {
     }
 
     logger_->log(LogLevel::Info, step_id(), "prepare" + std::string(": ") + "Target rootfs partition: " + rootfs_part +
-                       " -> " + part_result.value(, ctx.job_id));
+                       " -> " + part_result.value());
     return Result<void>::ok();
 }
 
@@ -82,35 +85,53 @@ Result<void> WriteRootfsStep::execute(JobContext& ctx, ProgressCallback progress
     }
 
     std::string target_path = part_result.value();
-    std::string source_path = "payload/" + rootfs_entry->file;
     uint64_t total_size = rootfs_entry->uncompressed_size > 0
                           ? rootfs_entry->uncompressed_size
                           : rootfs_entry->size;
 
     if (progress) {
         progress(ProgressInfo{0, "Writing rootfs to " + target_path + " ...",
-                              source_path, 0, total_size, 0.0});
+                              rootfs_entry->file, 0, total_size, 0.0});
     }
 
-    // Write rootfs. This is typically the largest payload and may use
-    // compressed format (e.g. ext4_zstd, tar_zst).
-    Result<void> write_result;
-    if (rootfs_entry->type == "raw") {
-        write_result = image_writer_->write_raw(
-            source_path, target_path, rootfs_entry->size,
-            [&progress](const ProgressInfo& pi) {
-                if (progress) progress(pi);
-            },
-            cancel);
-    } else {
-        // Use decompressing writer for compressed payloads.
-        write_result = image_writer_->write_decompressed(
-            source_path, target_path, total_size,
-            [&progress](const ProgressInfo& pi) {
-                if (progress) progress(pi);
-            },
-            cancel);
+    // Extract payload to a temporary file for streaming via ifstream.
+    std::string temp_path = "/tmp/installer_" + rootfs_entry->name + "_" + ctx.job_id;
+    auto extract_result = pkg_mgr_->extract_payload(
+        rootfs_entry->name, temp_path,
+        [&progress](const ProgressInfo& pi) {
+            if (progress) progress(pi);
+        },
+        cancel);
+    if (!extract_result.is_ok()) {
+        return extract_result;
     }
+
+    // Open the extracted payload as a stream.
+    std::ifstream source_stream(temp_path, std::ios::binary);
+    if (!source_stream.is_open()) {
+        std::remove(temp_path.c_str());
+        return Result<void>::err(InstallerError::make(
+            ErrorCode::INTERNAL_ERROR,
+            "File Open Failed",
+            "Cannot open extracted payload for streaming: " + temp_path));
+    }
+
+    // Configure write options from the manifest entry.
+    WriteOptions options;
+    options.expected_size = total_size;
+    options.expected_sha256 = rootfs_entry->sha256;
+
+    // Write the stream to the block device.
+    auto write_result = image_writer_->write(
+        source_stream, target_path, options,
+        [&progress](const ProgressInfo& pi) {
+            if (progress) progress(pi);
+        },
+        cancel);
+
+    // Best-effort cleanup of the temporary file.
+    source_stream.close();
+    std::remove(temp_path.c_str());
 
     if (!write_result.is_ok()) {
         return write_result;
@@ -122,7 +143,7 @@ Result<void> WriteRootfsStep::execute(JobContext& ctx, ProgressCallback progress
     }
 
     logger_->log(LogLevel::Info, step_id(), "complete" + std::string(": ") + "Rootfs written to " + target_path +
-                       " (" + std::to_string(total_size, ctx.job_id) + " bytes)");
+                       " (" + std::to_string(total_size) + " job=" + ctx.job_id + " bytes)");
     return Result<void>::ok();
 }
 
@@ -170,10 +191,10 @@ Result<void> WriteRootfsStep::verify(JobContext& ctx, ProgressCallback progress,
                               part_result.value(), 0, total_size, 0.0});
     }
 
-    // Verify by reading back and comparing against source.
+    // Verify by reading back from the device and comparing the SHA-256 hash.
     auto verify_result = image_writer_->verify(
-        "payload/" + rootfs_entry->file,
         part_result.value(),
+        rootfs_entry->sha256,
         total_size,
         [&progress](const ProgressInfo& pi) {
             if (progress) progress(pi);
@@ -182,7 +203,7 @@ Result<void> WriteRootfsStep::verify(JobContext& ctx, ProgressCallback progress,
 
     if (!verify_result.is_ok()) {
         logger_->log(LogLevel::Error, step_id(), "verify_failed" + std::string(": ") + "Rootfs verification failed: " +
-                           verify_result.error(, ctx.job_id).code);
+                           verify_result.error().code);
         return verify_result;
     }
 
@@ -199,7 +220,7 @@ Result<void> WriteRootfsStep::rollback(JobContext& ctx) {
     std::string rootfs_part = (ctx.target_slot == "B") ? "rootfs_a" : "rootfs_b";
     auto part_result = part_mgr_->find_partition(ctx.target_device, rootfs_part);
     if (part_result.is_ok()) {
-        logger_->log(LogLevel::Info, step_id(), "rollback" + std::string(": ") + "Rootfs partition " + part_result.value(, ctx.job_id) +
+        logger_->log(LogLevel::Info, step_id(), "rollback" + std::string(": ") + "Rootfs partition " + part_result.value() +
                            " left incomplete; will be re-written on next attempt");
     }
     return Result<void>::ok();

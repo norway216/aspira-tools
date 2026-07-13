@@ -82,7 +82,7 @@ Result<void> CheckStorageStep::execute(JobContext& ctx, ProgressCallback progres
     }
 
     logger_->log(LogLevel::Info, step_id(), "complete" + std::string(": ") + "Storage check passed: available=" +
-                       std::to_string(info.size_bytes, ctx.job_id) +
+                       std::to_string(info.size_bytes) + " job=" + ctx.job_id +
                        " required=" + std::to_string(required_with_margin));
 
     return Result<void>::ok();

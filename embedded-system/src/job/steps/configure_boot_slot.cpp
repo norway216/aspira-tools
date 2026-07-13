@@ -86,7 +86,7 @@ Result<void> ConfigureBootSlotStep::execute(JobContext& ctx, ProgressCallback pr
     auto write_result = boot_ctrl_->write_boot_env(env);
     if (!write_result.is_ok()) {
         logger_->log(LogLevel::Error, step_id(), "boot_env_write_failed" + std::string(": ") + "Failed to write boot environment: " +
-                           write_result.error(, ctx.job_id).code);
+                           write_result.error().code);
         return write_result;
     }
 
@@ -98,7 +98,7 @@ Result<void> ConfigureBootSlotStep::execute(JobContext& ctx, ProgressCallback pr
     auto slot_result = boot_ctrl_->set_active_slot(ctx.target_slot);
     if (!slot_result.is_ok()) {
         logger_->log(LogLevel::Warn, step_id(), "set_active_slot_failed" + std::string(": ") + "Failed to set active slot (may already be set): " +
-                           slot_result.error(, ctx.job_id).code);
+                           slot_result.error().code);
         // Non-fatal: the boot environment write above is the authoritative
         // mechanism. set_active_slot is a convenience wrapper.
     }
@@ -160,7 +160,7 @@ Result<void> ConfigureBootSlotStep::verify(JobContext& ctx, ProgressCallback pro
     }
 
     logger_->log(LogLevel::Info, step_id(), "verify" + std::string(": ") + "Boot environment verified: next_slot=" + env.next_slot +
-                       " upgrade_pending=" + (env.upgrade_pending ? "true" : "false", ctx.job_id) +
+                       " upgrade_pending=" + (env.upgrade_pending ? "true" : "false") + " job=" + ctx.job_id +
                        " attempts=" + std::to_string(env.boot_attempts_left));
 
     return Result<void>::ok();

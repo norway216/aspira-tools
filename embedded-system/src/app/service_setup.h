@@ -19,7 +19,7 @@
 #include "installer/ISecurityManager.h"
 #include "installer/IProcessRunner.h"
 #include "installer/IPackageManager.h"
-#include "installer/IImageWriter.h"
+#include "installer/image/iimage_writer.h"
 #include "installer/IPartitionManager.h"
 #include "installer/IFilesystemManager.h"
 #include "installer/IBootControl.h"

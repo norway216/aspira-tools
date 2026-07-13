@@ -62,7 +62,7 @@ Result<void> CreateFilesystemsStep::execute(JobContext& ctx, ProgressCallback pr
         auto part_result = part_mgr_->find_partition(ctx.target_device, part_name);
         if (!part_result.is_ok()) {
             logger_->log(LogLevel::Error, step_id(), "partition_not_found" + std::string(": ") + "Cannot find partition: " + part_name +
-                               " error=" + part_result.error(, ctx.job_id).code);
+                               " error=" + part_result.error().code);
             return part_result;
         }
 

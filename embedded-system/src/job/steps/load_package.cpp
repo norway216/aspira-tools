@@ -55,7 +55,7 @@ Result<void> LoadPackageStep::execute(JobContext& ctx, ProgressCallback progress
 
     // Store manifest in the job context for later steps.
     // We store the manifest data we need directly in ctx fields.
-    logger_->log(LogLevel::Info, step_id(), "manifest_loaded" + std::string(": ") + "package=" + manifest_result.value(, ctx.job_id).package_id +
+    logger_->log(LogLevel::Info, step_id(), "manifest_loaded" + std::string(": ") + "package=" + manifest_result.value().package_id + " job=" + ctx.job_id +
                        " version=" + manifest_result.value().version +
                        " product=" + manifest_result.value().product);
 
