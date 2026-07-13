@@ -1,0 +1,279 @@
+# ============================================================================
+# Embedded Linux Installer Configuration
+# ============================================================================
+# This file configures all aspects of the installer-core daemon, including
+# logging, storage targets, partition layouts, security settings, and
+# hardware profiles.
+#
+# Default path: /etc/installer/installer.yaml
+# ============================================================================
+
+# Schema version for forward compatibility
+version: "1.0"
+
+# ---------------------------------------------------------------------------
+# Installer Settings
+# ---------------------------------------------------------------------------
+installer:
+  # Directory for log files
+  log_dir: /var/log/installer
+
+  # Directory for transaction journal (crash recovery)
+  journal_dir: /var/lib/installer/journal
+
+  # Require external power supply before starting critical operations
+  require_external_power: true
+
+  # Minimum battery percentage required (ignored when external power present)
+  minimum_battery_percent: 20
+
+  # Run full read-back verification after every image write
+  full_verify_after_write: true
+
+  # How to identify the target disk: "partlabel", "partuuid", or "path"
+  target_by: partlabel
+
+  # Candidate device paths to scan (empty = auto-detect all non-system disks)
+  device_candidates: []
+
+  # Maximum concurrent I/O operations
+  max_concurrent_io: 4
+
+  # Default I/O chunk size for image writing (bytes)
+  io_chunk_size: 4194304  # 4 MiB
+
+# ---------------------------------------------------------------------------
+# IPC Settings
+# ---------------------------------------------------------------------------
+ipc:
+  # Unix domain socket path
+  socket_path: /var/run/installer.sock
+
+  # Socket permissions (octal)
+  socket_permissions: 0660
+
+  # Maximum number of concurrent client connections
+  max_clients: 32
+
+  # Default RPC timeout (milliseconds)
+  default_timeout_ms: 30000
+
+# ---------------------------------------------------------------------------
+# Security
+# ---------------------------------------------------------------------------
+security:
+  # Path to the Ed25519 public key for package signature verification
+  public_key_path: /etc/installer/keys/package_signing_key.pub
+
+  # Enable signature verification on all packages
+  verify_signatures: true
+
+  # Enable SHA-256 hash verification on all payloads
+  verify_hashes: true
+
+  # Encryption key path for backup encryption (AES-256-GCM)
+  backup_encryption_key_path: /etc/installer/keys/backup_key.bin
+
+  # Enable backup encryption
+  encrypt_backups: true
+
+# ---------------------------------------------------------------------------
+# Partition Layouts
+# ---------------------------------------------------------------------------
+# Each layout defines a complete disk partitioning scheme. The default
+# layout is "ab_standard_v1". Other layouts can be referenced by name
+# in the hardware profiles section below.
+partition_layouts:
+  # Standard A/B layout for eMMC/SD cards (7.5 GB minimum)
+  ab_standard_v1:
+    name: ab_standard_v1
+    table_type: gpt
+    alignment_mib: 4
+    partitions:
+      - name: boot_a
+        size_mib: 256
+        filesystem: vfat
+        label: BOOT_A
+      - name: boot_b
+        size_mib: 256
+        filesystem: vfat
+        label: BOOT_B
+      - name: rootfs_a
+        size_mib: 3072
+        filesystem: ext4
+        label: ROOTFS_A
+      - name: rootfs_b
+        size_mib: 3072
+        filesystem: ext4
+        label: ROOTFS_B
+      - name: data
+        size_mib: 0   # fill remaining space
+        filesystem: ext4
+        label: DATA
+
+  # Minimal single-slot layout for small devices (2 GB minimum)
+  single_v1:
+    name: single_v1
+    table_type: gpt
+    alignment_mib: 4
+    partitions:
+      - name: boot
+        size_mib: 256
+        filesystem: vfat
+        label: BOOT
+      - name: rootfs
+        size_mib: 0   # fill remaining space
+        filesystem: ext4
+        label: ROOTFS
+
+  # NVMe-optimized layout with larger boot partitions
+  nvme_standard_v1:
+    name: nvme_standard_v1
+    table_type: gpt
+    alignment_mib: 1   # NVMe typically uses 4K alignment
+    partitions:
+      - name: boot_a
+        size_mib: 512
+        filesystem: vfat
+        label: BOOT_A
+      - name: boot_b
+        size_mib: 512
+        filesystem: vfat
+        label: BOOT_B
+      - name: rootfs_a
+        size_mib: 8192
+        filesystem: ext4
+        label: ROOTFS_A
+      - name: rootfs_b
+        size_mib: 8192
+        filesystem: ext4
+        label: ROOTFS_B
+      - name: data
+        size_mib: 0
+        filesystem: ext4
+        label: DATA
+
+# ---------------------------------------------------------------------------
+# Boot Configuration
+# ---------------------------------------------------------------------------
+boot:
+  # Path to U-Boot fw_env.config
+  fw_env_config: /etc/fw_env.config
+
+  # U-Boot environment variable names
+  boot_vars:
+    active_slot: active_slot
+    next_slot: next_slot
+    upgrade_pending: upgrade_pending
+    boot_attempts_left: boot_attempts
+    slot_a_good: slot_a_good
+    slot_b_good: slot_b_good
+
+  # Maximum boot attempts before fallback
+  max_boot_attempts: 3
+
+# ---------------------------------------------------------------------------
+# Hardware Profiles
+# ---------------------------------------------------------------------------
+# Each profile specifies device-tree overlays, kernel command-line arguments,
+# and other hardware-specific settings. The installer auto-detects the best
+# matching profile using device-tree compatible strings.
+hardware_profiles:
+  # Raspberry Pi 4
+  rpi4:
+    compatible: "raspberrypi,4-model-b"
+    dtoverlays:
+      - vc4-fkms-v3d
+      - i2c-rtc,ds3231
+    kernel_cmdline_append: "cgroup_memory=1 cgroup_enable=memory"
+    partition_layout: ab_standard_v1
+    min_disk_size_bytes: 8000000000  # 8 GB
+
+  # Raspberry Pi 5
+  rpi5:
+    compatible: "raspberrypi,5-model-b"
+    dtoverlays:
+      - vc4-kms-v3d-pi5
+      - i2c-rtc,ds3231
+    kernel_cmdline_append: "cgroup_memory=1 cgroup_enable=memory"
+    partition_layout: ab_standard_v1
+    min_disk_size_bytes: 8000000000
+
+  # NVIDIA Jetson Nano
+  jetson_nano:
+    compatible: "nvidia,p3450-0000"
+    partition_layout: ab_standard_v1
+    min_disk_size_bytes: 16000000000  # 16 GB
+
+  # Generic x86_64
+  generic_x86:
+    compatible: "generic-x86-64"
+    partition_layout: nvme_standard_v1
+    min_disk_size_bytes: 32000000000  # 32 GB
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging:
+  # Log level: debug, info, warn, error
+  level: info
+
+  # Enable structured JSON logging (JSON Lines format)
+  structured: true
+
+  # Log rotation settings
+  rotation:
+    max_file_size_mb: 10
+    max_files: 5
+
+  # Also log to syslog
+  syslog_enabled: true
+
+# ---------------------------------------------------------------------------
+# Network (for OTA updates)
+# ---------------------------------------------------------------------------
+network:
+  # Update server URL
+  update_server: https://updates.example.com
+
+  # Download timeout (seconds)
+  download_timeout_sec: 300
+
+  # Verify TLS certificates
+  verify_tls: true
+
+  # CA certificate bundle path
+  ca_bundle_path: /etc/ssl/certs/ca-certificates.crt
+
+  # Proxy settings
+  proxy: ""
+  no_proxy: ""
+
+# ---------------------------------------------------------------------------
+# Backup Profiles
+# ---------------------------------------------------------------------------
+backup_profiles:
+  # Full system backup
+  full_system:
+    description: "Full system backup including all partitions"
+    include_partitions:
+      - BOOT_A
+      - BOOT_B
+      - ROOTFS_A
+      - ROOTFS_B
+    compress: true
+    compression_format: zstd
+
+  # User data only
+  user_data:
+    description: "User data and configuration backup"
+    include_partitions:
+      - DATA
+    compress: true
+    compression_format: zstd
+
+  # Boot environment only (for recovery)
+  boot_env:
+    description: "U-Boot environment backup"
+    include_env: true
+    include_partitions: []

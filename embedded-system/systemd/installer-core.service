@@ -1,0 +1,58 @@
+[Unit]
+Description=Embedded Linux Installer Core Daemon
+Documentation=https://example.com/installer/docs
+After=network.target local-fs.target
+Before=getty.target
+
+# Wait for the root filesystem to be fully available
+RequiresMountsFor=/var/log /var/lib /var/run
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/installer-core --config /etc/installer/installer.yaml --socket /var/run/installer.sock
+ExecStop=/usr/bin/installer-cli --socket /var/run/installer.sock shutdown
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=SIGINT SIGTERM
+
+# Runtime directory for the IPC socket
+RuntimeDirectory=installer
+RuntimeDirectoryMode=0750
+
+# State directory for the transaction journal
+StateDirectory=installer
+StateDirectoryMode=0700
+
+# Log directory
+LogsDirectory=installer
+LogsDirectoryMode=0750
+
+# Security hardening
+User=installer
+Group=installer
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/log/installer /var/lib/installer /var/run/installer
+ReadOnlyPaths=/etc/installer /etc/fw_env.config
+DeviceAllow=block-* rw
+DevicePolicy=closed
+
+# Allow the daemon to manage block devices
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_RAWIO CAP_MKNOD CAP_DAC_OVERRIDE
+AmbientCapabilities=CAP_SYS_ADMIN CAP_SYS_RAWIO CAP_MKNOD CAP_DAC_OVERRIDE
+
+# Resource limits
+LimitNOFILE=1024
+LimitNPROC=64
+MemoryMax=256M
+TasksMax=32
+
+# Kill timeout (graceful shutdown)
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+
+# Start only when system is ready
+WantedBy=multi-user.target
