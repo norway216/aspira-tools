@@ -29,6 +29,25 @@
 #define BLKFLSBUF _IO(0x12, 97)
 #endif
 
+// =========================================================================
+// ScopedThread — RAII wrapper that joins on destruction.
+//
+// Prevents std::terminate if a thread is destroyed while joinable (e.g.
+// when creating the 2nd or 3rd thread throws after previous threads have
+// already been started).
+// =========================================================================
+class ScopedThread {
+public:
+    ScopedThread() = default;
+    template<typename F>
+    explicit ScopedThread(F&& f) : t_(std::forward<F>(f)) {}
+    ~ScopedThread() { if (t_.joinable()) t_.join(); }
+    ScopedThread(ScopedThread&&) = default;
+    ScopedThread& operator=(ScopedThread&&) = default;
+private:
+    std::thread t_;
+};
+
 namespace installer {
 
 // =========================================================================
@@ -354,7 +373,7 @@ Result<void> ImageWriter::write(const std::string& device_path,
     // =====================================================================
     // Reader Thread — source istream -> BoundedQueue
     // =====================================================================
-    std::thread reader_thread([&]() {
+    ScopedThread reader_thread([&]() {
         size_t chunk_index = 0;
 
         while (!cancel.is_cancelled() && !pipeline_error.load(std::memory_order_acquire)) {
@@ -394,6 +413,14 @@ Result<void> ImageWriter::write(const std::string& device_path,
                 }
             }
 
+            // Check cancellation / error before blocking on push.
+            // If we proceed into a blocking push after cancellation has been
+            // requested, we may never wake up unless the queue is closed.
+            if (cancel.is_cancelled() || pipeline_error.load(std::memory_order_acquire)) {
+                queue.close();
+                break;
+            }
+
             if (!queue.push(std::move(chunk))) {
                 // Queue was closed (error or cancellation).
                 break;
@@ -411,7 +438,7 @@ Result<void> ImageWriter::write(const std::string& device_path,
     // =====================================================================
     // Writer Thread — BoundedQueue -> block device (O_DIRECT)
     // =====================================================================
-    std::thread writer_thread([&]() {
+    ScopedThread writer_thread([&]() {
         // Open the block device with O_DIRECT | O_SYNC.
         auto fd_result = open_device_direct(device_path);
         if (!fd_result.is_ok()) {
@@ -444,7 +471,19 @@ Result<void> ImageWriter::write(const std::string& device_path,
         uint64_t local_bytes_written = 0;
 
         DataChunk chunk;
-        while (queue.pop(chunk)) {
+        while (true) {
+            // Check cancellation / error before blocking on pop.
+            // If we proceed into a blocking pop after cancellation has been
+            // requested, we may never wake up unless the queue is closed.
+            if (cancel.is_cancelled() || pipeline_error.load(std::memory_order_acquire)) {
+                queue.close();
+                break;
+            }
+            if (!queue.pop(chunk)) {
+                break;
+            }
+            // Double-check after receiving a chunk — cancellation may have
+            // been requested while we were blocked in pop().
             if (cancel.is_cancelled() || pipeline_error.load(std::memory_order_acquire)) {
                 break;
             }
@@ -509,6 +548,18 @@ Result<void> ImageWriter::write(const std::string& device_path,
                         true));  // retryable
                     return;
                 }
+                if (n == 0) {
+                    // pwrite returned 0 — device full or end-of-device
+                    free(write_buf);
+                    close(fd);
+                    set_error(InstallerError::make(
+                        ErrorCode::IMAGE_WRITE_FAILED,
+                        "Write Error",
+                        "pwrite returned 0 — device may be full",
+                        "offset=" + std::to_string(offset) +
+                        " size=" + std::to_string(write_size)));
+                    return;
+                }
                 total_written += static_cast<size_t>(n);
             }
 
@@ -557,7 +608,7 @@ Result<void> ImageWriter::write(const std::string& device_path,
     // =====================================================================
     // Verifier Thread — read-back from device + SHA-256 comparison
     // =====================================================================
-    std::thread verifier_thread([&]() {
+    ScopedThread verifier_thread([&]() {
         // Wait until the writer has completed (or the pipeline has failed /
         // been cancelled).
         {
@@ -674,13 +725,6 @@ Result<void> ImageWriter::write(const std::string& device_path,
                 "expected=" + expected_sha256 + " actual=" + actual_hash));
         }
     });
-
-    // =====================================================================
-    // Join all threads
-    // =====================================================================
-    reader_thread.join();
-    writer_thread.join();
-    verifier_thread.join();
 
     // ---- Propagate errors ----
     if (first_error.has_value()) {

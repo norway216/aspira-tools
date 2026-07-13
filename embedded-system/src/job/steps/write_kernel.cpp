@@ -1,5 +1,8 @@
 #include "src/job/steps/write_kernel.h"
 
+#include <cstdio>
+#include <fstream>
+
 namespace installer {
 
 WriteKernelStep::WriteKernelStep(std::shared_ptr<IImageWriter> image_writer,
@@ -37,7 +40,7 @@ Result<void> WriteKernelStep::prepare(JobContext& ctx) {
     }
 
     logger_->log(LogLevel::Info, step_id(), "prepare" + std::string(": ") + "Target kernel partition: " + kernel_part +
-                       " -> " + part_result.value(, ctx.job_id));
+                       " -> " + part_result.value());
     return Result<void>::ok();
 }
 
@@ -82,30 +85,52 @@ Result<void> WriteKernelStep::execute(JobContext& ctx, ProgressCallback progress
     }
 
     std::string target_path = part_result.value();
-    std::string source_path = "payload/" + kernel_entry->file;
 
     if (progress) {
         progress(ProgressInfo{0, "Writing kernel to " + target_path,
-                              source_path, 0, kernel_entry->size, 0.0});
+                              kernel_entry->file, 0, kernel_entry->size, 0.0});
     }
 
-    // Write kernel image.
-    Result<void> write_result;
-    if (kernel_entry->type == "raw") {
-        write_result = image_writer_->write_raw(
-            source_path, target_path, kernel_entry->size,
-            [&progress](const ProgressInfo& pi) {
-                if (progress) progress(pi);
-            },
-            cancel);
-    } else {
-        write_result = image_writer_->write_decompressed(
-            source_path, target_path, kernel_entry->uncompressed_size,
-            [&progress](const ProgressInfo& pi) {
-                if (progress) progress(pi);
-            },
-            cancel);
+    // Extract payload to a temporary file for streaming via ifstream.
+    std::string temp_path = "/tmp/installer_" + kernel_entry->name + "_" + ctx.job_id;
+    auto extract_result = pkg_mgr_->extract_payload(
+        kernel_entry->name, temp_path,
+        [&progress](const ProgressInfo& pi) {
+            if (progress) progress(pi);
+        },
+        cancel);
+    if (!extract_result.is_ok()) {
+        return extract_result;
     }
+
+    // Open the extracted payload as a stream.
+    std::ifstream source_stream(temp_path, std::ios::binary);
+    if (!source_stream.is_open()) {
+        std::remove(temp_path.c_str());
+        return Result<void>::err(InstallerError::make(
+            ErrorCode::INTERNAL_ERROR,
+            "File Open Failed",
+            "Cannot open extracted payload for streaming: " + temp_path));
+    }
+
+    // Configure write options from the manifest entry.
+    WriteOptions options;
+    options.expected_size = kernel_entry->uncompressed_size > 0
+                            ? kernel_entry->uncompressed_size
+                            : kernel_entry->size;
+    options.expected_sha256 = kernel_entry->sha256;
+
+    // Write the stream to the block device.
+    auto write_result = image_writer_->write(
+        source_stream, target_path, options,
+        [&progress](const ProgressInfo& pi) {
+            if (progress) progress(pi);
+        },
+        cancel);
+
+    // Best-effort cleanup of the temporary file.
+    source_stream.close();
+    std::remove(temp_path.c_str());
 
     if (!write_result.is_ok()) {
         return write_result;
@@ -158,8 +183,8 @@ Result<void> WriteKernelStep::verify(JobContext& ctx, ProgressCallback progress,
     }
 
     auto verify_result = image_writer_->verify(
-        "payload/" + kernel_entry->file,
         part_result.value(),
+        kernel_entry->sha256,
         kernel_entry->size,
         [&progress](const ProgressInfo& pi) {
             if (progress) {
@@ -183,7 +208,7 @@ Result<void> WriteKernelStep::rollback(JobContext& ctx) {
     std::string kernel_part = (ctx.target_slot == "B") ? "kernel_a" : "kernel_b";
     auto part_result = part_mgr_->find_partition(ctx.target_device, kernel_part);
     if (part_result.is_ok()) {
-        logger_->log(LogLevel::Info, step_id(), "rollback" + std::string(": ") + "Kernel partition " + part_result.value(, ctx.job_id) +
+        logger_->log(LogLevel::Info, step_id(), "rollback" + std::string(": ") + "Kernel partition " + part_result.value() +
                            " left incomplete; will be re-written on next attempt");
     }
     return Result<void>::ok();

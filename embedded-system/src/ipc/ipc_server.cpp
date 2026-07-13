@@ -170,15 +170,24 @@ void UnixSocketJsonRpcServer::stop() {
 
     running_.store(false, std::memory_order_release);
 
-    // Wake up epoll by writing to a self-pipe or just join with timeout.
-    // For simplicity, we close the listen fd to unblock accept().
-    if (listen_fd_ >= 0) {
-        close(listen_fd_);
-        listen_fd_ = -1;
+    // Close epoll_fd to unblock epoll_wait immediately.
+    // This causes epoll_wait to return with EBADF, allowing the
+    // event loop thread to exit cleanly instead of blocking for
+    // up to EPOLL_TIMEOUT_MS.
+    if (epoll_fd_ >= 0) {
+        int efd = epoll_fd_;
+        epoll_fd_ = -1;
+        close(efd);
     }
 
     if (worker_thread_.joinable()) {
         worker_thread_.join();
+    }
+
+    // Close listen socket
+    if (listen_fd_ >= 0) {
+        close(listen_fd_);
+        listen_fd_ = -1;
     }
 
     // Close all client connections
@@ -190,11 +199,6 @@ void UnixSocketJsonRpcServer::stop() {
             }
         }
         clients_.clear();
-    }
-
-    if (epoll_fd_ >= 0) {
-        close(epoll_fd_);
-        epoll_fd_ = -1;
     }
 
     unlink(socket_path_.c_str());
@@ -393,8 +397,17 @@ void UnixSocketJsonRpcServer::handle_client_read(int fd) {
                     std::lock_guard<std::mutex> lock(clients_mutex_);
                     auto it = clients_.find(fd);
                     if (it != clients_.end()) {
+                        bool was_empty = it->second->write_buffer.empty();
                         it->second->write_buffer += framed.value();
                         it->second->write_pending = true;
+
+                        // Re-arm EPOLLOUT for edge-triggered mode
+                        if (was_empty) {
+                            struct epoll_event ev{};
+                            ev.events = EPOLLIN | EPOLLOUT | EPOLLET | EPOLLRDHUP;
+                            ev.data.fd = it->second->fd;
+                            epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, it->second->fd, &ev);
+                        }
                     }
                 }
             }
@@ -407,38 +420,42 @@ void UnixSocketJsonRpcServer::handle_client_read(int fd) {
 // =========================================================================
 
 void UnixSocketJsonRpcServer::handle_client_write(int fd) {
-    Client* client = nullptr;
+    int write_errno = 0;
+    bool should_close = false;
+
     {
         std::lock_guard<std::mutex> lock(clients_mutex_);
         auto it = clients_.find(fd);
         if (it == clients_.end()) return;
-        client = it->second.get();
-    }
+        Client* client = it->second.get();
 
-    if (client->write_buffer.empty()) {
-        return;
-    }
+        if (client->write_buffer.empty()) return;
 
-    while (!client->write_buffer.empty()) {
-        ssize_t n = write(fd, client->write_buffer.data(),
-                          client->write_buffer.size());
-        if (n > 0) {
-            client->write_buffer.erase(0, static_cast<size_t>(n));
-        } else if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                break;  // socket buffer full, try again later
+        // Write under lock — non-blocking I/O returns immediately,
+        // so holding the mutex during write() is safe and prevents
+        // a data race with broadcast_event() / dispatch_request()
+        // concurrently modifying write_buffer.
+        while (!client->write_buffer.empty()) {
+            ssize_t n = write(fd, client->write_buffer.data(),
+                              client->write_buffer.size());
+            if (n > 0) {
+                client->write_buffer.erase(0, static_cast<size_t>(n));
+            } else if (n < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                if (errno == EINTR) continue;
+                write_errno = errno;
+                should_close = true;
+                break;
             }
-            if (errno == EINTR) {
-                continue;
-            }
-            logger_->error(std::string("Write error on fd ") +
-                           std::to_string(fd) + ": " + std::strerror(errno));
-            handle_client_close(fd);
-            return;
         }
+        client->write_pending = !client->write_buffer.empty();
     }
 
-    client->write_pending = !client->write_buffer.empty();
+    if (should_close) {
+        logger_->error(std::string("Write error on fd ") +
+                       std::to_string(fd) + ": " + std::strerror(write_errno));
+        handle_client_close(fd);
+    }
 }
 
 // =========================================================================
@@ -526,8 +543,17 @@ void UnixSocketJsonRpcServer::dispatch_request(int fd,
         std::lock_guard<std::mutex> lock(clients_mutex_);
         auto it = clients_.find(fd);
         if (it != clients_.end()) {
+            bool was_empty = it->second->write_buffer.empty();
             it->second->write_buffer += framed.value();
             it->second->write_pending = true;
+
+            // Re-arm EPOLLOUT for edge-triggered mode
+            if (was_empty) {
+                struct epoll_event ev{};
+                ev.events = EPOLLIN | EPOLLOUT | EPOLLET | EPOLLRDHUP;
+                ev.data.fd = it->second->fd;
+                epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, it->second->fd, &ev);
+            }
         }
     }
 }
@@ -555,8 +581,20 @@ void UnixSocketJsonRpcServer::broadcast_event(const std::string& event,
 
     std::lock_guard<std::mutex> lock(clients_mutex_);
     for (auto& kv : clients_) {
+        bool was_empty = kv.second->write_buffer.empty();
         kv.second->write_buffer += framed.value();
         kv.second->write_pending = true;
+
+        // Re-arm EPOLLOUT for edge-triggered mode: with EPOLLET the kernel
+        // only notifies when the socket transitions from not-writable to
+        // writable. Adding data to an empty buffer requires a manual re-arm
+        // so the event loop sees that there is data to write.
+        if (was_empty) {
+            struct epoll_event ev{};
+            ev.events = EPOLLIN | EPOLLOUT | EPOLLET | EPOLLRDHUP;
+            ev.data.fd = kv.second->fd;
+            epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, kv.second->fd, &ev);
+        }
     }
 }
 

@@ -76,6 +76,7 @@ private:
         std::vector<JournalEntry> entries;
         std::shared_ptr<ILogger> logger;
         mutable std::shared_mutex mutex;
+        bool initialized_ = true;
     };
     std::unique_ptr<Impl> impl_;
 };

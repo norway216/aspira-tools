@@ -525,15 +525,15 @@ BootControl::set_next_boot_slot(const std::string& slot) {
 
     const std::string& s = normalized.value();
 
-    // Write next_slot
-    auto result = write_boot_var("next_slot", s);
-    if (!result.is_ok()) {
-        return result;
-    }
-
-    // Mark that an upgrade/switch is pending so the bootloader knows to
-    // perform the slot switch and decrement boot_attempts_left.
-    return write_boot_var("upgrade_pending", "1");
+    // Use batch write for atomicity: if next_slot succeeds but
+    // upgrade_pending fails, the U-Boot environment is inconsistent.
+    // write_vars() writes all variables via a single fw_setenv -s
+    // invocation, which is atomic from U-Boot's perspective.
+    std::map<std::string, std::string> vars;
+    vars["next_slot"]          = s;
+    vars["upgrade_pending"]    = "1";
+    vars["boot_attempts_left"] = "3";
+    return write_vars(vars);
 }
 
 Result<std::string>

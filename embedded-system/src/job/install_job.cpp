@@ -82,7 +82,7 @@ InstallJob::InstallJob(const std::string& job_id,
     logger_->log(LogLevel::Info, "InstallJob", "constructed" + std::string(": ") + "InstallJob created for device=" + target_device +
                        " slot=" + target_slot +
                        " package=" + package_path +
-                       " steps=" + std::to_string(steps_.size(, job_id)));
+                       " steps=" + std::to_string(steps_.size()) + " job=" + job_id);
 }
 
 Result<void> InstallJob::start(CancellationToken& cancel) {

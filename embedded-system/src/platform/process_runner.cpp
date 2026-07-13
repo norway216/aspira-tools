@@ -183,7 +183,20 @@ void monitor_thread_func(MonitorState& ms) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
             if (!ms.done.load(std::memory_order_acquire)) {
-                ::kill(ms.pid, SIGKILL);
+                // Secondary safeguard: verify the PID still belongs to
+                // our child before sending SIGKILL.  If the child has
+                // exited and the PID was recycled, waitpid returns a
+                // different result or -1 (ESRCH).
+                int wstatus = 0;
+                pid_t wresult = ::waitpid(ms.pid, &wstatus, WNOHANG);
+                if (wresult == ms.pid) {
+                    // Child exited and we reaped it — do NOT kill
+                    ms.done.store(true, std::memory_order_release);
+                } else if (wresult == 0) {
+                    // Child still running — safe to kill
+                    ::kill(ms.pid, SIGKILL);
+                }
+                // wresult == -1: child does not exist (ESRCH), do nothing
             }
             break;
         }
@@ -197,7 +210,14 @@ void monitor_thread_func(MonitorState& ms) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
             if (!ms.done.load(std::memory_order_acquire)) {
-                ::kill(ms.pid, SIGKILL);
+                // Secondary safeguard against PID reuse (see above)
+                int wstatus = 0;
+                pid_t wresult = ::waitpid(ms.pid, &wstatus, WNOHANG);
+                if (wresult == ms.pid) {
+                    ms.done.store(true, std::memory_order_release);
+                } else if (wresult == 0) {
+                    ::kill(ms.pid, SIGKILL);
+                }
             }
             break;
         }
@@ -404,6 +424,10 @@ Result<ProcessResult> ProcessRunner::run_impl(
         pid_t waited = ::waitpid(pid, &status, WNOHANG);
         if (waited == pid) {
             child_exited = true;
+            // Signal monitor IMMEDIATELY after reaping the child,
+            // BEFORE the PID can be recycled.  This prevents the
+            // monitor from sending SIGKILL to a reused PID.
+            monitor_state.done.store(true, std::memory_order_release);
 
             if (WIFEXITED(status)) {
                 result.exit_code = WEXITSTATUS(status);
@@ -434,14 +458,32 @@ Result<ProcessResult> ProcessRunner::run_impl(
 
     // ---- Final child reaping (in case monitor killed it) ----
     if (!child_exited) {
-        int status = 0;
-        pid_t waited = ::waitpid(pid, &status, 0);
-        if (waited == pid) {
-            if (WIFEXITED(status)) {
-                result.exit_code = WEXITSTATUS(status);
-            } else if (WIFSIGNALED(status)) {
-                result.exit_code = -1;
+        // Poll with timeout instead of blocking forever.
+        // A child stuck in D-state (uninterruptible sleep) will never
+        // respond to SIGKILL and a blocking waitpid would hang us too.
+        auto final_deadline = std::chrono::steady_clock::now()
+                              + std::chrono::seconds(30);
+        while (std::chrono::steady_clock::now() < final_deadline) {
+            int status = 0;
+            pid_t waited = ::waitpid(pid, &status, WNOHANG);
+            if (waited == pid) {
+                if (WIFEXITED(status)) {
+                    result.exit_code = WEXITSTATUS(status);
+                } else if (WIFSIGNALED(status)) {
+                    result.exit_code = -1;
+                }
+                child_exited = true;
+                break;
             }
+            if (waited < 0 && errno != EINTR) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (!child_exited) {
+            result.timed_out = true;
+            // Don't block forever — the zombie will be reaped by init
+            // when our process exits.
         }
     }
 

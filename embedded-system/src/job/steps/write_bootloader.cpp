@@ -1,5 +1,8 @@
 #include "src/job/steps/write_bootloader.h"
 
+#include <cstdio>
+#include <fstream>
+
 namespace installer {
 
 WriteBootloaderStep::WriteBootloaderStep(std::shared_ptr<IImageWriter> image_writer,
@@ -56,37 +59,68 @@ Result<void> WriteBootloaderStep::execute(JobContext& ctx, ProgressCallback prog
         }
     }
 
-    // If no explicit bootloader payload, we write to the raw device beginning.
+    // If no explicit bootloader payload, skip.
     // Bootloader typically occupies the first few MB before the first partition.
-    // In a real implementation, the package manager would export the payload path.
+    if (!bootloader_entry) {
+        logger_->log(LogLevel::Warn, step_id(), "no_bootloader_payload" + std::string(": ") + "No bootloader payload found in manifest; skipping", ctx.job_id);
+        return Result<void>::ok();
+    }
 
     if (progress) {
         progress(ProgressInfo{10, "Writing bootloader image...",
                               ctx.target_device, 0, bl_size, 0.0});
     }
 
-    // Write bootloader to the raw device (beginning of disk).
-    // The bootloader typically goes before the first partition, at offset 0
-    // or a platform-specific offset (e.g. 8KB for some SoCs).
-    if (bootloader_entry) {
-        auto write_result = image_writer_->write_raw(
-            "payload/" + bootloader_entry->file,
-            ctx.target_device,
-            bootloader_entry->size,
-            [&progress](const ProgressInfo& pi) {
-                if (progress) {
-                    ProgressInfo adjusted = pi;
-                    adjusted.percent = 10 + (pi.percent * 80) / 100;
-                    progress(adjusted);
-                }
-            },
-            cancel);
+    // Extract payload to a temporary file for streaming via ifstream.
+    std::string temp_path = "/tmp/installer_" + bootloader_entry->name + "_" + ctx.job_id;
+    auto extract_result = pkg_mgr_->extract_payload(
+        bootloader_entry->name, temp_path,
+        [&progress](const ProgressInfo& pi) {
+            if (progress) {
+                ProgressInfo adjusted = pi;
+                adjusted.percent = 10 + (pi.percent * 80) / 100;
+                progress(adjusted);
+            }
+        },
+        cancel);
+    if (!extract_result.is_ok()) {
+        return extract_result;
+    }
 
-        if (!write_result.is_ok()) {
-            return write_result;
-        }
-    } else {
-        logger_->log(LogLevel::Warn, step_id(), "no_bootloader_payload" + std::string(": ") + "No bootloader payload found in manifest; skipping", ctx.job_id);
+    // Open the extracted payload as a stream.
+    std::ifstream source_stream(temp_path, std::ios::binary);
+    if (!source_stream.is_open()) {
+        std::remove(temp_path.c_str());
+        return Result<void>::err(InstallerError::make(
+            ErrorCode::INTERNAL_ERROR,
+            "File Open Failed",
+            "Cannot open extracted payload for streaming: " + temp_path));
+    }
+
+    // Configure write options from the manifest entry.
+    WriteOptions options;
+    options.expected_size = bootloader_entry->size;
+    options.expected_sha256 = bootloader_entry->sha256;
+
+    // Write the stream to the block device.
+    // Bootloader goes before the first partition, at offset 0 on the raw device.
+    auto write_result = image_writer_->write(
+        source_stream, ctx.target_device, options,
+        [&progress](const ProgressInfo& pi) {
+            if (progress) {
+                ProgressInfo adjusted = pi;
+                adjusted.percent = 10 + (pi.percent * 80) / 100;
+                progress(adjusted);
+            }
+        },
+        cancel);
+
+    // Best-effort cleanup of the temporary file.
+    source_stream.close();
+    std::remove(temp_path.c_str());
+
+    if (!write_result.is_ok()) {
+        return write_result;
     }
 
     if (progress) {

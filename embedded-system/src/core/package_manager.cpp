@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -263,7 +264,16 @@ private:
         while (pos_ < input_.size()) {
             char c = input_[pos_];
             if (c < '0' || c > '9') break;
-            num = num * 10 + static_cast<int64_t>(c - '0');
+            int64_t digit = static_cast<int64_t>(c - '0');
+            if (num > INT64_MAX / 10) {
+                throw std::runtime_error("JSONParser: integer overflow in number at position " +
+                                         std::to_string(pos_));
+            }
+            if (num == INT64_MAX / 10 && digit > INT64_MAX % 10) {
+                throw std::runtime_error("JSONParser: integer overflow in number at position " +
+                                         std::to_string(pos_));
+            }
+            num = num * 10 + digit;
             ++pos_;
         }
 
@@ -311,6 +321,21 @@ private:
  * ========================================================================= */
 
 namespace {
+
+/// Validate that a file path from the manifest is safe (no path traversal).
+static bool is_safe_path(const std::string& path) {
+    if (path.empty()) return false;
+    if (path[0] == '/') return false;
+    if (path.find("..") != std::string::npos) return false;
+    for (char c : path) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) &&
+            c != '-' && c != '_' && c != '.' && c != '/') {
+            return false;
+        }
+        if (c == '\\') return false;
+    }
+    return true;
+}
 
 /// nftw(3) callback — removes a single filesystem entry.
 int nftw_remove_callback(const char* fpath,
@@ -532,6 +557,15 @@ Result<void> PackageManager::verify_payload_hash(const std::string& payload_name
             "Payload '" + payload_name + "' not found in manifest."));
     }
 
+    // Validate the payload file path to prevent path traversal attacks
+    if (!is_safe_path(entry->file)) {
+        return Result<void>::err(InstallerError::make(
+            ErrorCode::PACKAGE_MANIFEST_ERROR,
+            "Path Traversal Detected",
+            "The payload file path '" + entry->file + "' contains unsafe characters or patterns.",
+            "Payload file path failed is_safe_path() validation"));
+    }
+
     // Extract the payload file
     auto extract_result = extract_file(package_path_, entry->file);
     if (!extract_result.is_ok()) {
@@ -596,6 +630,15 @@ Result<void> PackageManager::extract_payload(const std::string& payload_name,
             ErrorCode::PACKAGE_MANIFEST_ERROR,
             "Payload Not Found",
             "Payload '" + payload_name + "' not found in manifest."));
+    }
+
+    // Validate the payload file path to prevent path traversal attacks
+    if (!is_safe_path(entry->file)) {
+        return Result<void>::err(InstallerError::make(
+            ErrorCode::PACKAGE_MANIFEST_ERROR,
+            "Path Traversal Detected",
+            "The payload file path '" + entry->file + "' contains unsafe characters or patterns.",
+            "Payload file path failed is_safe_path() validation"));
     }
 
     // ---- Phase 1: extract the file from the archive into temp_dir_ ----
@@ -878,6 +921,15 @@ Result<bool> PackageManager::verify_package(const CancellationToken& cancel) {
 
         const auto& payload = manifest_.payloads[i];
 
+        // Validate the payload file path to prevent path traversal attacks
+        if (!is_safe_path(payload.file)) {
+            return Result<bool>::err(InstallerError::make(
+                ErrorCode::PACKAGE_MANIFEST_ERROR,
+                "Path Traversal Detected",
+                "The payload file path '" + payload.file + "' contains unsafe characters or patterns.",
+                "Payload file path failed is_safe_path() validation"));
+        }
+
         // Extract this payload to temp
         auto extract_result = extract_file(package_path_, payload.file);
         if (!extract_result.is_ok()) {
@@ -1056,6 +1108,15 @@ Result<std::unique_ptr<std::istream>> PackageManager::open_payload(
 
     std::string file_name = resolve_result.value();
 
+    // Validate the payload file path to prevent path traversal attacks
+    if (!is_safe_path(file_name)) {
+        return Result<std::unique_ptr<std::istream>>::err(InstallerError::make(
+            ErrorCode::PACKAGE_MANIFEST_ERROR,
+            "Path Traversal Detected",
+            "The payload file path '" + file_name + "' contains unsafe characters or patterns.",
+            "Payload file path failed is_safe_path() validation"));
+    }
+
     // Extract the payload file to temp_dir_
     auto extract_result = extract_file(package_path_, file_name);
     if (!extract_result.is_ok()) {
@@ -1159,6 +1220,15 @@ Result<bool> PackageManager::check_compatibility(const Manifest& manifest,
 Result<std::string> PackageManager::extract_file(const std::string& archive_path,
                                                   const std::string& file_name) {
     // Caller must hold mutex_
+
+    // Validate the file name to prevent path traversal attacks
+    if (!is_safe_path(file_name)) {
+        return Result<std::string>::err(InstallerError::make(
+            ErrorCode::PACKAGE_CORRUPTED,
+            "Path Traversal Detected",
+            "The file path '" + file_name + "' contains unsafe characters or patterns.",
+            "Path failed is_safe_path() validation"));
+    }
 
     // Try zstd-compressed extraction first, since .espkg uses tar+zstd
     {
@@ -1323,6 +1393,12 @@ Result<Manifest> PackageManager::parse_manifest_json(const std::string& json_pat
     // min_disk_size_bytes
     auto it_mds = obj.find("min_disk_size_bytes");
     if (it_mds != obj.end() && it_mds->second.type == JSONType::Number) {
+        if (it_mds->second.number_val < 0) {
+            return Result<Manifest>::err(InstallerError::make(
+                ErrorCode::PACKAGE_MANIFEST_ERROR,
+                "Manifest Format Error",
+                "min_disk_size_bytes must be non-negative."));
+        }
         manifest.min_disk_size_bytes = static_cast<uint64_t>(it_mds->second.number_val);
     }
 
@@ -1363,11 +1439,23 @@ Result<Manifest> PackageManager::parse_manifest_json(const std::string& json_pat
 
             auto p_size = pl_obj.find("size");
             if (p_size != pl_obj.end() && p_size->second.type == JSONType::Number) {
+                if (p_size->second.number_val < 0) {
+                    return Result<Manifest>::err(InstallerError::make(
+                        ErrorCode::PACKAGE_MANIFEST_ERROR,
+                        "Manifest Format Error",
+                        "Payload 'size' field must be non-negative."));
+                }
                 entry.size = static_cast<uint64_t>(p_size->second.number_val);
             }
 
             auto p_usize = pl_obj.find("uncompressed_size");
             if (p_usize != pl_obj.end() && p_usize->second.type == JSONType::Number) {
+                if (p_usize->second.number_val < 0) {
+                    return Result<Manifest>::err(InstallerError::make(
+                        ErrorCode::PACKAGE_MANIFEST_ERROR,
+                        "Manifest Format Error",
+                        "Payload 'uncompressed_size' field must be non-negative."));
+                }
                 entry.uncompressed_size = static_cast<uint64_t>(p_usize->second.number_val);
             }
 

@@ -85,8 +85,8 @@ Result<void> VerifyTargetStep::execute(JobContext& ctx, ProgressCallback progres
                                : payload.size;
 
         auto verify_result = image_writer_->verify(
-            "payload/" + payload.file,
             part_result.value(),
+            payload.sha256,
             verify_size,
             [&progress, pct, total](const ProgressInfo& pi) {
                 if (progress) {
@@ -99,7 +99,7 @@ Result<void> VerifyTargetStep::execute(JobContext& ctx, ProgressCallback progres
 
         if (!verify_result.is_ok()) {
             logger_->log(LogLevel::Error, step_id(), "payload_verify_failed" + std::string(": ") + "Verification failed for " + payload.name +
-                               ": " + verify_result.error(, ctx.job_id).code);
+                               ": " + verify_result.error().code);
             return verify_result;
         }
 

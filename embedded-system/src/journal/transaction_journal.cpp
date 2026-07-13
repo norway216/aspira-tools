@@ -160,14 +160,23 @@ TransactionJournal::TransactionJournal(const std::string& journal_dir,
             impl_->logger->log(LogLevel::Error, comp,
                                "Failed to create journal_dir: " +
                                std::string(strerror(errno)));
+            // Re-check: if directory still doesn't exist, journal is unusable.
+            if (stat(journal_dir.c_str(), &st) != 0) {
+                impl_->logger->log(LogLevel::Error, comp,
+                                   "Journal directory does not exist and cannot be created. "
+                                   "All journal operations will return errors.");
+                impl_->initialized_ = false;
+                return;
+            }
         }
     }
 
     auto result = load_from_disk();
     if (!result.is_ok()) {
         impl_->logger->log(LogLevel::Error, comp,
-                           "Failed to load journal: " +
-                           result.error().technical_message);
+                           "Failed to load existing journal: " +
+                           result.error().technical_message +
+                           " (a new journal file will be created on first write)");
     }
 
     auto incomplete = find_incomplete();
@@ -197,6 +206,12 @@ TransactionJournal::~TransactionJournal() = default;
 
 Result<void> TransactionJournal::begin(const std::string& transaction_id,
                                         const std::string& operation) {
+    if (!impl_->initialized_) {
+        return Result<void>::err(InstallerError::make(
+            ErrorCode::INTERNAL_ERROR, "Journal Unavailable",
+            "Transaction journal is not initialized",
+            "The journal directory could not be created"));
+    }
     std::unique_lock<std::shared_mutex> lock(impl_->mutex);
 
     for (const auto& e : impl_->entries) {
@@ -227,6 +242,12 @@ Result<void> TransactionJournal::begin(const std::string& transaction_id,
 }
 
 Result<void> TransactionJournal::update(const JournalEntry& entry) {
+    if (!impl_->initialized_) {
+        return Result<void>::err(InstallerError::make(
+            ErrorCode::INTERNAL_ERROR, "Journal Unavailable",
+            "Transaction journal is not initialized",
+            "The journal directory could not be created"));
+    }
     std::unique_lock<std::shared_mutex> lock(impl_->mutex);
 
     auto* existing = find_entry(entry.transaction_id);
@@ -254,6 +275,12 @@ Result<void> TransactionJournal::update(const JournalEntry& entry) {
 }
 
 Result<void> TransactionJournal::commit(const std::string& transaction_id) {
+    if (!impl_->initialized_) {
+        return Result<void>::err(InstallerError::make(
+            ErrorCode::INTERNAL_ERROR, "Journal Unavailable",
+            "Transaction journal is not initialized",
+            "The journal directory could not be created"));
+    }
     std::unique_lock<std::shared_mutex> lock(impl_->mutex);
 
     auto* entry = find_entry(transaction_id);
@@ -277,6 +304,12 @@ Result<void> TransactionJournal::commit(const std::string& transaction_id) {
 }
 
 Result<void> TransactionJournal::abort(const std::string& transaction_id) {
+    if (!impl_->initialized_) {
+        return Result<void>::err(InstallerError::make(
+            ErrorCode::INTERNAL_ERROR, "Journal Unavailable",
+            "Transaction journal is not initialized",
+            "The journal directory could not be created"));
+    }
     std::unique_lock<std::shared_mutex> lock(impl_->mutex);
 
     auto* entry = find_entry(transaction_id);
@@ -298,6 +331,12 @@ Result<void> TransactionJournal::abort(const std::string& transaction_id) {
 }
 
 Result<JournalEntry> TransactionJournal::get(const std::string& transaction_id) {
+    if (!impl_->initialized_) {
+        return Result<JournalEntry>::err(InstallerError::make(
+            ErrorCode::INTERNAL_ERROR, "Journal Unavailable",
+            "Transaction journal is not initialized",
+            "The journal directory could not be created"));
+    }
     std::shared_lock<std::shared_mutex> lock(impl_->mutex);
 
     auto* entry = find_entry(transaction_id);
@@ -312,6 +351,12 @@ Result<JournalEntry> TransactionJournal::get(const std::string& transaction_id) 
 }
 
 Result<std::vector<JournalEntry>> TransactionJournal::find_incomplete() {
+    if (!impl_->initialized_) {
+        return Result<std::vector<JournalEntry>>::err(InstallerError::make(
+            ErrorCode::INTERNAL_ERROR, "Journal Unavailable",
+            "Transaction journal is not initialized",
+            "The journal directory could not be created"));
+    }
     std::shared_lock<std::shared_mutex> lock(impl_->mutex);
 
     std::vector<JournalEntry> result;
@@ -325,6 +370,12 @@ Result<std::vector<JournalEntry>> TransactionJournal::find_incomplete() {
 }
 
 Result<std::vector<JournalEntry>> TransactionJournal::list_all() {
+    if (!impl_->initialized_) {
+        return Result<std::vector<JournalEntry>>::err(InstallerError::make(
+            ErrorCode::INTERNAL_ERROR, "Journal Unavailable",
+            "Transaction journal is not initialized",
+            "The journal directory could not be created"));
+    }
     std::shared_lock<std::shared_mutex> lock(impl_->mutex);
     return Result<std::vector<JournalEntry>>::ok(impl_->entries);
 }
@@ -336,6 +387,12 @@ Result<std::vector<JournalEntry>> TransactionJournal::list_all() {
 Result<void> TransactionJournal::update_state(const std::string& tx_id,
                                                JournalState state,
                                                int progress) {
+    if (!impl_->initialized_) {
+        return Result<void>::err(InstallerError::make(
+            ErrorCode::INTERNAL_ERROR, "Journal Unavailable",
+            "Transaction journal is not initialized",
+            "The journal directory could not be created"));
+    }
     std::unique_lock<std::shared_mutex> lock(impl_->mutex);
 
     auto* entry = find_entry(tx_id);
@@ -361,6 +418,12 @@ Result<void> TransactionJournal::update_state(const std::string& tx_id,
 
 Result<void> TransactionJournal::mark_step_complete(const std::string& tx_id,
                                                      const std::string& step_name) {
+    if (!impl_->initialized_) {
+        return Result<void>::err(InstallerError::make(
+            ErrorCode::INTERNAL_ERROR, "Journal Unavailable",
+            "Transaction journal is not initialized",
+            "The journal directory could not be created"));
+    }
     std::unique_lock<std::shared_mutex> lock(impl_->mutex);
 
     auto* entry = find_entry(tx_id);
@@ -390,6 +453,13 @@ Result<void> TransactionJournal::mark_step_complete(const std::string& tx_id,
 // ============================================================================
 
 Result<void> TransactionJournal::atomic_save() {
+    if (!impl_->initialized_) {
+        return Result<void>::err(InstallerError::make(
+            ErrorCode::INTERNAL_ERROR, "Journal Unavailable",
+            "Transaction journal is not initialized",
+            "The journal directory could not be created"));
+    }
+
     json root = json::array();
     for (const auto& e : impl_->entries) {
         root.push_back(entry_to_json(e));
@@ -447,10 +517,19 @@ Result<void> TransactionJournal::atomic_save() {
             " errno=" + std::to_string(errno)));
     }
 
-    // Step 5: fsync directory.
+    // Step 5: fsync directory to make the rename durable.
     ScopedFd dir_fd(open(impl_->journal_dir.c_str(), O_RDONLY | O_DIRECTORY));
-    if (dir_fd.valid()) {
-        fsync(dir_fd.get());
+    if (!dir_fd.valid()) {
+        return Result<void>::err(InstallerError::make(
+            ErrorCode::INTERNAL_ERROR, "Journal Dir Error",
+            "Failed to open journal directory for fsync",
+            "dir=" + impl_->journal_dir + " errno=" + std::to_string(errno)));
+    }
+    if (fsync(dir_fd.get()) != 0) {
+        return Result<void>::err(InstallerError::make(
+            ErrorCode::INTERNAL_ERROR, "Journal Sync Error",
+            "Failed to fsync journal directory",
+            "dir=" + impl_->journal_dir + " errno=" + std::to_string(errno)));
     }
 
     return Result<void>::ok();
