@@ -1,0 +1,20 @@
+[Unit]
+Description=Embedded Linux Installer Watchdog
+After=installer-core.service
+BindsTo=installer-core.service
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/installer-watchdog
+Restart=always
+RestartSec=5
+
+# Security hardening
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+PrivateDevices=true
+
+[Install]
+WantedBy=multi-user.target
