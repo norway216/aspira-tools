@@ -30,7 +30,7 @@ Result<void> WriteKernelStep::prepare(JobContext& ctx) {
         kernel_part = "kernel_a";
     }
 
-    auto part_result = part_mgr_->find_partition(ctx.target_device, kernel_part);
+    auto part_result = part_mgr_->get_partition_by_label(ctx.target_device, kernel_part);
     if (!part_result.is_ok()) {
         return Result<void>::err(InstallerError::make(
             ErrorCode::PARTITION_NOT_FOUND,
@@ -55,13 +55,14 @@ Result<void> WriteKernelStep::execute(JobContext& ctx, ProgressCallback progress
     }
 
     auto manifest_result = pkg_mgr_->load_manifest();
-    if (!manifest_result.is_ok()) {
-        return manifest_result;
+    if (manifest_result.is_err()) {
+        return Result<void>::err(manifest_result.take_error());
     }
+    auto& manifest = manifest_result.value();
 
     // Find kernel payload.
     const PayloadEntry* kernel_entry = nullptr;
-    for (const auto& payload : manifest_result.value().payloads) {
+    for (const auto& payload : manifest.payloads) {
         if (payload.name == "kernel" ||
             payload.target == "kernel_inactive" ||
             payload.name.find("kernel") != std::string::npos) {
@@ -79,9 +80,9 @@ Result<void> WriteKernelStep::execute(JobContext& ctx, ProgressCallback progress
 
     // Determine target partition.
     std::string kernel_part = (ctx.target_slot == "B") ? "kernel_a" : "kernel_b";
-    auto part_result = part_mgr_->find_partition(ctx.target_device, kernel_part);
-    if (!part_result.is_ok()) {
-        return part_result;
+    auto part_result = part_mgr_->get_partition_by_label(ctx.target_device, kernel_part);
+    if (part_result.is_err()) {
+        return Result<void>::err(part_result.take_error());
     }
 
     std::string target_path = part_result.value();
@@ -154,12 +155,13 @@ Result<void> WriteKernelStep::verify(JobContext& ctx, ProgressCallback progress,
     }
 
     auto manifest_result = pkg_mgr_->load_manifest();
-    if (!manifest_result.is_ok()) {
-        return manifest_result;
+    if (manifest_result.is_err()) {
+        return Result<void>::err(manifest_result.take_error());
     }
+    auto& manifest = manifest_result.value();
 
     const PayloadEntry* kernel_entry = nullptr;
-    for (const auto& payload : manifest_result.value().payloads) {
+    for (const auto& payload : manifest.payloads) {
         if (payload.name == "kernel" || payload.target == "kernel_inactive" ||
             payload.name.find("kernel") != std::string::npos) {
             kernel_entry = &payload;
@@ -172,9 +174,9 @@ Result<void> WriteKernelStep::verify(JobContext& ctx, ProgressCallback progress,
     }
 
     std::string kernel_part = (ctx.target_slot == "B") ? "kernel_a" : "kernel_b";
-    auto part_result = part_mgr_->find_partition(ctx.target_device, kernel_part);
-    if (!part_result.is_ok()) {
-        return part_result;
+    auto part_result = part_mgr_->get_partition_by_label(ctx.target_device, kernel_part);
+    if (part_result.is_err()) {
+        return Result<void>::err(part_result.take_error());
     }
 
     if (progress) {
@@ -206,7 +208,7 @@ Result<void> WriteKernelStep::verify(JobContext& ctx, ProgressCallback progress,
 Result<void> WriteKernelStep::rollback(JobContext& ctx) {
     // Best-effort: mark the target partition as invalid by zeroing first sector.
     std::string kernel_part = (ctx.target_slot == "B") ? "kernel_a" : "kernel_b";
-    auto part_result = part_mgr_->find_partition(ctx.target_device, kernel_part);
+    auto part_result = part_mgr_->get_partition_by_label(ctx.target_device, kernel_part);
     if (part_result.is_ok()) {
         logger_->log(LogLevel::Info, step_id(), "rollback" + std::string(": ") + "Kernel partition " + part_result.value() +
                            " left incomplete; will be re-written on next attempt");

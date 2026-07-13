@@ -31,11 +31,12 @@ public:
 
     Result<void> create_partition_table(const std::string& device_path,
                                          const PartitionLayout& layout) override;
-    Result<std::vector<PartitionSpec>> read_partition_table(const std::string& device_path) override;
-    Result<bool> verify_partition_layout(const std::string& device_path,
+    Result<PartitionLayout> read_partition_table(const std::string& device_path) override;
+    Result<void> verify_partition_layout(const std::string& device_path,
                                           const PartitionLayout& expected) override;
-    Result<std::string> get_partition_by_label(const std::string& label) override;
-    Result<void> wait_for_partitions(const std::string& device_path, int timeout_sec = 10) override;
+    Result<std::string> get_partition_by_label(const std::string& device,
+                                                const std::string& label) override;
+    Result<void> wait_for_partitions(const std::string& device_path, int timeout_sec = 10);
 
 private:
     // ---- GPT type code helpers ----------------------------------------------

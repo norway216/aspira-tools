@@ -42,11 +42,10 @@ Result<void> WriteBootloaderStep::execute(JobContext& ctx, ProgressCallback prog
 
     // Look up the bootloader payload from the manifest.
     auto manifest_result = pkg_mgr_->load_manifest();
-    if (!manifest_result.is_ok()) {
-        return manifest_result;
+    if (manifest_result.is_err()) {
+        return Result<void>::err(manifest_result.take_error());
     }
-
-    const auto& manifest = manifest_result.value();
+    auto& manifest = manifest_result.value();
 
     // Find the bootloader payload entry.
     const PayloadEntry* bootloader_entry = nullptr;

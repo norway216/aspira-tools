@@ -11,7 +11,7 @@
 #define INSTALLER_IPC_SERVER_H
 
 #include "installer/IIPCServer.h"
-#include "installer/ILogger.h"
+#include "installer/log/ilogger.h"
 #include "json_rpc_codec.h"
 #include <atomic>
 #include <functional>

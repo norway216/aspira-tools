@@ -37,9 +37,10 @@ Result<void> VerifySignatureStep::execute(JobContext& ctx, ProgressCallback prog
     }
 
     auto manifest_result = pkg_mgr_->load_manifest();
-    if (!manifest_result.is_ok()) {
-        return manifest_result;
+    if (manifest_result.is_err()) {
+        return Result<void>::err(manifest_result.take_error());
     }
+    auto& manifest = manifest_result.value();
 
     if (progress) {
         progress(ProgressInfo{50, "Verifying Ed25519 signature...", "", 0, 0, 0.0});
@@ -50,12 +51,11 @@ Result<void> VerifySignatureStep::execute(JobContext& ctx, ProgressCallback prog
     // In production, the package manager provides the manifest bytes and signature.
 
     // Compute SHA-256 of the package manifest for integrity check.
-    auto manifest = manifest_result.value();
     std::string manifest_text = manifest.package_id + manifest.version + manifest.build_id;
 
     // Convert to vector<uint8_t> for the updated ISecurityManager interface.
     std::vector<uint8_t> manifest_bytes(manifest_text.begin(), manifest_text.end());
-    auto hash = sec_mgr_->sha256(manifest_bytes);
+    auto hash = sec_mgr_->compute_sha256(manifest_bytes);
 
     // Verify payload hashes.
     for (const auto& payload : manifest.payloads) {

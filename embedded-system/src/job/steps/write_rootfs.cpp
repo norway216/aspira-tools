@@ -30,7 +30,7 @@ Result<void> WriteRootfsStep::prepare(JobContext& ctx) {
         rootfs_part = "rootfs_a";
     }
 
-    auto part_result = part_mgr_->find_partition(ctx.target_device, rootfs_part);
+    auto part_result = part_mgr_->get_partition_by_label(ctx.target_device, rootfs_part);
     if (!part_result.is_ok()) {
         return Result<void>::err(InstallerError::make(
             ErrorCode::PARTITION_NOT_FOUND,
@@ -55,13 +55,14 @@ Result<void> WriteRootfsStep::execute(JobContext& ctx, ProgressCallback progress
     }
 
     auto manifest_result = pkg_mgr_->load_manifest();
-    if (!manifest_result.is_ok()) {
-        return manifest_result;
+    if (manifest_result.is_err()) {
+        return Result<void>::err(manifest_result.take_error());
     }
+    auto& manifest = manifest_result.value();
 
     // Find rootfs payload (may be named "rootfs" or target "rootfs_inactive").
     const PayloadEntry* rootfs_entry = nullptr;
-    for (const auto& payload : manifest_result.value().payloads) {
+    for (const auto& payload : manifest.payloads) {
         if (payload.name == "rootfs" ||
             payload.target == "rootfs_inactive" ||
             payload.name.find("rootfs") != std::string::npos) {
@@ -79,9 +80,9 @@ Result<void> WriteRootfsStep::execute(JobContext& ctx, ProgressCallback progress
 
     // Determine target partition.
     std::string rootfs_part = (ctx.target_slot == "B") ? "rootfs_a" : "rootfs_b";
-    auto part_result = part_mgr_->find_partition(ctx.target_device, rootfs_part);
-    if (!part_result.is_ok()) {
-        return part_result;
+    auto part_result = part_mgr_->get_partition_by_label(ctx.target_device, rootfs_part);
+    if (part_result.is_err()) {
+        return Result<void>::err(part_result.take_error());
     }
 
     std::string target_path = part_result.value();
@@ -156,12 +157,13 @@ Result<void> WriteRootfsStep::verify(JobContext& ctx, ProgressCallback progress,
     }
 
     auto manifest_result = pkg_mgr_->load_manifest();
-    if (!manifest_result.is_ok()) {
-        return manifest_result;
+    if (manifest_result.is_err()) {
+        return Result<void>::err(manifest_result.take_error());
     }
+    auto& manifest = manifest_result.value();
 
     const PayloadEntry* rootfs_entry = nullptr;
-    for (const auto& payload : manifest_result.value().payloads) {
+    for (const auto& payload : manifest.payloads) {
         if (payload.name == "rootfs" || payload.target == "rootfs_inactive" ||
             payload.name.find("rootfs") != std::string::npos) {
             rootfs_entry = &payload;
@@ -177,9 +179,9 @@ Result<void> WriteRootfsStep::verify(JobContext& ctx, ProgressCallback progress,
     }
 
     std::string rootfs_part = (ctx.target_slot == "B") ? "rootfs_a" : "rootfs_b";
-    auto part_result = part_mgr_->find_partition(ctx.target_device, rootfs_part);
-    if (!part_result.is_ok()) {
-        return part_result;
+    auto part_result = part_mgr_->get_partition_by_label(ctx.target_device, rootfs_part);
+    if (part_result.is_err()) {
+        return Result<void>::err(part_result.take_error());
     }
 
     uint64_t total_size = rootfs_entry->uncompressed_size > 0
@@ -218,7 +220,7 @@ Result<void> WriteRootfsStep::verify(JobContext& ctx, ProgressCallback progress,
 
 Result<void> WriteRootfsStep::rollback(JobContext& ctx) {
     std::string rootfs_part = (ctx.target_slot == "B") ? "rootfs_a" : "rootfs_b";
-    auto part_result = part_mgr_->find_partition(ctx.target_device, rootfs_part);
+    auto part_result = part_mgr_->get_partition_by_label(ctx.target_device, rootfs_part);
     if (part_result.is_ok()) {
         logger_->log(LogLevel::Info, step_id(), "rollback" + std::string(": ") + "Rootfs partition " + part_result.value() +
                            " left incomplete; will be re-written on next attempt");

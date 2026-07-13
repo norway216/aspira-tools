@@ -159,9 +159,11 @@ BootControl::run_fw_tool(const std::vector<std::string>& args,
     }
 
     CancellationToken cancel;   // not cancellable from outside
-    return proc_runner_->run(args,
-                             std::chrono::milliseconds(timeout_ms),
-                             &cancel);
+    ProcessArgs pa;
+    pa.program = args[0];
+    pa.args.assign(args.begin() + 1, args.end());
+    pa.timeout = std::chrono::milliseconds(timeout_ms);
+    return proc_runner_->run(pa, cancel);
 }
 
 Result<std::map<std::string, std::string>>
@@ -320,7 +322,7 @@ BootControl::write_vars(const std::map<std::string, std::string>& vars) {
 // =============================================================================
 
 Result<BootEnv>
-BootControl::read_boot_env() {
+BootControl::get_boot_env() {
     auto vars_result = read_all_vars();
     if (!vars_result.is_ok()) {
         return Result<BootEnv>::err(vars_result.take_error());
@@ -444,6 +446,23 @@ BootControl::get_inactive_slot() {
     return Result<std::string>::ok("B");
 }
 
+Result<std::string>
+BootControl::get_current_slot() {
+    return get_active_slot();
+}
+
+Result<void>
+BootControl::request_recovery_boot() {
+    return write_boot_var("recovery_boot", "1");
+}
+
+Result<void>
+BootControl::commit_boot_env() {
+    // All writes are committed immediately via write_boot_var(),
+    // so there are no pending changes to flush.
+    return Result<void>::ok();
+}
+
 // =============================================================================
 // Extended API
 // =============================================================================
@@ -517,7 +536,7 @@ BootControl::commit_boot_env(const BootEnv& env) {
 }
 
 Result<void>
-BootControl::set_next_boot_slot(const std::string& slot) {
+BootControl::set_next_slot(const std::string& slot) {
     auto normalized = validate_and_normalize_slot(slot);
     if (!normalized.is_ok()) {
         return Result<void>::err(normalized.take_error());
@@ -547,7 +566,7 @@ BootControl::get_active_slot() {
     }
 
     // Slow path: read the environment and populate the cache
-    auto env_result = read_boot_env();
+    auto env_result = get_boot_env();
     if (!env_result.is_ok()) {
         return Result<std::string>::err(env_result.take_error());
     }

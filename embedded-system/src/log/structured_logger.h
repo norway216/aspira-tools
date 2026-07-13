@@ -44,7 +44,7 @@ public:
                    const std::string& event_name,
                    const std::string& json_fields = "{}") override;
 
-    Result<void> set_log_file(const std::string& path) override;
+    void set_log_file(const std::string& path) override;
 
     void flush() override;
 
@@ -58,7 +58,7 @@ public:
      * @param max_files    Keep at most this many rotated files (default 5).
      * @return             Ok on success.
      */
-    Result<void> set_log_file_with_rotation(const std::string& path,
+    void set_log_file_with_rotation(const std::string& path,
                                             size_t max_size_mb = 10,
                                             int max_files = 5);
 

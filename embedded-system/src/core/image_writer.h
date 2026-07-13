@@ -112,37 +112,31 @@ public:
     ImageWriter();
     ~ImageWriter() override;
 
-    Result<void> write(const std::string& device_path,
-                       std::istream& source,
-                       const std::string& expected_sha256,
-                       const CancellationToken& cancel = CancellationToken(),
-                       ProgressCallback progress = nullptr) override;
+    Result<void> write(std::istream& source_stream,
+                       const std::string& target_device,
+                       const WriteOptions& options,
+                       ProgressCallback callback,
+                       CancellationToken& token) override;
 
-    Result<bool> verify(const std::string& device_path,
+    Result<void> verify(const std::string& target_device,
                         const std::string& expected_sha256,
-                        uint64_t size_bytes,
-                        const CancellationToken& cancel = CancellationToken(),
-                        ProgressCallback progress = nullptr) override;
+                        uint64_t expected_size,
+                        ProgressCallback callback,
+                        CancellationToken& token) override;
 
     /**
      * Set the I/O chunk size.
      * The value is rounded up to the nearest 512-byte boundary to satisfy
      * O_DIRECT block-alignment requirements.
      */
-    void set_chunk_size(size_t bytes) override;
+    void set_chunk_size(size_t bytes);
 
 private:
-    // Forward declaration of the SHA-256 context (defined in the .cpp file).
-    struct SHA256Context;
-
     /** Open a block device with O_WRONLY | O_DIRECT | O_SYNC. */
     Result<int> open_device_direct(const std::string& device_path);
 
     /** Flush device buffers: fsync() + BLKFLSBUF ioctl. */
     Result<void> flush_device(int fd);
-
-    /** Finalize a SHA-256 context and return the hex-encoded digest string. */
-    static std::string sha256_hex_string(SHA256Context& ctx);
 
     size_t chunk_size_ = 4 * 1024 * 1024; // 4 MiB default
 };

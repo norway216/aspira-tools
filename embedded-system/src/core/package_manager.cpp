@@ -9,7 +9,7 @@
  * anonymous namespace below — no external JSON library is required.
  */
 
-#include "core/package_manager.h"
+#include "src/core/package_manager.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -30,6 +30,24 @@
 #include <vector>
 
 namespace installer {
+
+namespace {
+
+// Compatibility wrapper: converts old-style (args, timeout, token) calls
+// to the new ProcessArgs-based IProcessRunner interface.
+Result<ProcessResult> run_process(IProcessRunner* runner,
+                                   const std::vector<std::string>& args,
+                                   std::chrono::milliseconds timeout,
+                                   CancellationToken* token = nullptr) {
+    ProcessArgs pa;
+    pa.program = args[0];
+    pa.args.assign(args.begin() + 1, args.end());
+    pa.timeout = timeout;
+    CancellationToken dummy;
+    return runner->run(pa, token ? *token : dummy);
+}
+
+} // anonymous namespace
 
 /* =========================================================================
  *  Embedded JSON Parser (anonymous namespace)
@@ -428,9 +446,9 @@ Result<void> PackageManager::open(const std::string& package_path) {
     // ---- Quick sanity: verify tar can list the archive ----
     {
         std::vector<std::string> args = {"tar", "--list", "-f", package_path};
-        auto result = proc_runner_->run(args,
-                                        std::chrono::seconds(30),
-                                        nullptr);
+        auto result = run_process(proc_runner_, args,
+                                   std::chrono::seconds(30),
+                                   nullptr);
         if (!result.is_ok()) {
             remove_directory(temp_dir_);
             temp_dir_.clear();
@@ -574,19 +592,31 @@ Result<void> PackageManager::verify_payload_hash(const std::string& payload_name
 
     std::string extracted_path = extract_result.value();
 
-    // Verify using ISecurityManager
-    auto verify_result = sec_mgr_->verify_hash(extracted_path, entry->sha256);
+    // Read file and verify SHA-256 hash
+    {
+        std::ifstream file(extracted_path, std::ios::binary);
+        if (!file.is_open()) {
+            ::unlink(extracted_path.c_str());
+            return Result<void>::err(InstallerError::make(
+                ErrorCode::INTERNAL_ERROR,
+                "Read Error",
+                "Could not open extracted payload for hash verification."));
+        }
+        std::vector<uint8_t> file_data((std::istreambuf_iterator<char>(file)),
+                                        std::istreambuf_iterator<char>());
+        std::string computed = sec_mgr_->compute_sha256(file_data);
+        if (computed != entry->sha256) {
+            ::unlink(extracted_path.c_str());
+            return Result<void>::err(InstallerError::make(
+                ErrorCode::PACKAGE_HASH_MISMATCH,
+                "Hash Mismatch",
+                "Payload '" + payload_name + "' hash verification failed.",
+                "expected=" + entry->sha256 + " actual=" + computed));
+        }
+    }
 
     // Clean up
     ::unlink(extracted_path.c_str());
-
-    if (!verify_result.is_ok()) {
-        return Result<void>::err(InstallerError::make(
-            ErrorCode::PACKAGE_HASH_MISMATCH,
-            "Hash Mismatch",
-            "Payload '" + payload_name + "' hash verification failed.",
-            verify_result.error().technical_message));
-    }
 
     return Result<void>::ok();
 }
@@ -669,9 +699,9 @@ Result<void> PackageManager::extract_payload(const std::string& payload_name,
             "-C", temp_dir_,
             entry->file
         };
-        auto run_result = proc_runner_->run(args,
-                                            std::chrono::minutes(10),
-                                            &cancel);
+        auto run_result = run_process(proc_runner_, args,
+                                       std::chrono::minutes(10),
+                                       &cancel);
 
         if (!run_result.is_ok() || run_result.value().exit_code != 0) {
             // Fallback: try without --zstd
@@ -680,9 +710,9 @@ Result<void> PackageManager::extract_payload(const std::string& payload_name,
                 "-C", temp_dir_,
                 entry->file
             };
-            run_result = proc_runner_->run(args2,
-                                           std::chrono::minutes(10),
-                                           &cancel);
+            run_result = run_process(proc_runner_, args2,
+                                      std::chrono::minutes(10),
+                                      &cancel);
         }
 
         if (!run_result.is_ok()) {
@@ -946,13 +976,22 @@ Result<bool> PackageManager::verify_package(const CancellationToken& cancel) {
 
         std::string extracted_path = extract_result.value();
 
-        // Verify hash
-        auto hash_result = sec_mgr_->verify_hash(extracted_path, payload.sha256);
+        // Read file and verify SHA-256 hash
+        bool hash_ok = false;
+        {
+            std::ifstream file(extracted_path, std::ios::binary);
+            if (file.is_open()) {
+                std::vector<uint8_t> file_data((std::istreambuf_iterator<char>(file)),
+                                                std::istreambuf_iterator<char>());
+                std::string computed = sec_mgr_->compute_sha256(file_data);
+                hash_ok = (computed == payload.sha256);
+            }
+        }
 
         // Clean up immediately
         ::unlink(extracted_path.c_str());
 
-        if (!hash_result.is_ok()) {
+        if (!hash_ok) {
             return Result<bool>::ok(false);  // Hash mismatch — not an error, just invalid
         }
     }
@@ -1061,7 +1100,10 @@ Result<bool> PackageManager::verify_signature() {
     }
 
     // ---- Verify signature ----
-    auto verify_result = sec_mgr_->verify_signature(manifest_content, signature_bytes);
+    // Pass empty public_key string; the SecurityManager uses its embedded key.
+    std::vector<uint8_t> manifest_bytes(manifest_content.begin(), manifest_content.end());
+    std::vector<uint8_t> sig_bytes(signature_bytes.begin(), signature_bytes.end());
+    auto verify_result = sec_mgr_->verify_signature(manifest_bytes, sig_bytes, "");
 
     if (!verify_result.is_ok()) {
         // Signature verification itself returned an error
@@ -1072,7 +1114,7 @@ Result<bool> PackageManager::verify_signature() {
             verify_result.error().technical_message));
     }
 
-    return Result<bool>::ok(true);
+    return Result<bool>::ok(verify_result.value());
 }
 
 
@@ -1127,18 +1169,7 @@ Result<std::unique_ptr<std::istream>> PackageManager::open_payload(
 
     // Open as ifstream.  The unique_ptr will use a custom deleter that
     // closes the stream and removes the temporary file.
-    auto deleter = [extracted_path](std::istream* stream) {
-        // Close the underlying file
-        auto* fs = static_cast<std::ifstream*>(stream);
-        fs->close();
-        delete fs;
-        // Remove the temp file
-        ::unlink(extracted_path.c_str());
-    };
-
-    auto file_stream = std::unique_ptr<std::istream>(
-        new std::ifstream(extracted_path, std::ios::binary),
-        deleter);
+    auto file_stream = std::unique_ptr<std::istream>(new std::ifstream(extracted_path, std::ios::binary));
 
     if (!file_stream->good()) {
         return Result<std::unique_ptr<std::istream>>::err(InstallerError::make(
@@ -1160,9 +1191,9 @@ Result<bool> PackageManager::check_compatibility(const Manifest& manifest,
     // ---- Check architecture via uname ----
     {
         std::vector<std::string> args = {"uname", "-m"};
-        auto run_result = proc_runner_->run(args,
-                                            std::chrono::seconds(5),
-                                            nullptr);
+        auto run_result = run_process(proc_runner_, args,
+                                       std::chrono::seconds(5),
+                                       nullptr);
         if (!run_result.is_ok()) {
             return Result<bool>::err(InstallerError::make(
                 ErrorCode::INTERNAL_ERROR,
@@ -1237,9 +1268,9 @@ Result<std::string> PackageManager::extract_file(const std::string& archive_path
             "-C", temp_dir_,
             file_name
         };
-        auto result = proc_runner_->run(args,
-                                        std::chrono::seconds(30),
-                                        nullptr);
+        auto result = run_process(proc_runner_, args,
+                                   std::chrono::seconds(30),
+                                   nullptr);
 
         if (result.is_ok() && result.value().exit_code == 0) {
             std::string extracted_path = temp_dir_ + "/" + file_name;
@@ -1257,9 +1288,9 @@ Result<std::string> PackageManager::extract_file(const std::string& archive_path
             "-C", temp_dir_,
             file_name
         };
-        auto result = proc_runner_->run(args,
-                                        std::chrono::seconds(30),
-                                        nullptr);
+        auto result = run_process(proc_runner_, args,
+                                   std::chrono::seconds(30),
+                                   nullptr);
 
         if (!result.is_ok()) {
             return Result<std::string>::err(result.take_error());

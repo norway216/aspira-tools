@@ -23,6 +23,23 @@
 
 namespace installer {
 
+namespace {
+
+// Compatibility wrapper: converts old-style (args, timeout) calls to the
+// new ProcessArgs-based IProcessRunner interface.
+Result<ProcessResult> run_process(IProcessRunner* runner,
+                                   const std::vector<std::string>& args,
+                                   std::chrono::milliseconds timeout) {
+    ProcessArgs pa;
+    pa.program = args[0];
+    pa.args.assign(args.begin() + 1, args.end());
+    pa.timeout = timeout;
+    CancellationToken cancel;
+    return runner->run(pa, cancel);
+}
+
+} // anonymous namespace
+
 // =============================================================================
 // Construction / Destruction
 // =============================================================================
@@ -195,7 +212,7 @@ Result<void> PartitionManager::create_partition_table(
     // ---- Step 1: Zap all existing partition tables --------------------------
     {
         std::vector<std::string> args = {"sgdisk", "--zap-all", device_path};
-        auto result = proc_runner_->run(args, std::chrono::seconds(30));
+        auto result = run_process(proc_runner_, args, std::chrono::seconds(30));
 
         if (!result.is_ok()) {
             return Result<void>::err(
@@ -273,7 +290,7 @@ Result<void> PartitionManager::create_partition_table(
 
     // ---- Step 3: Execute the partition-creation command ---------------------
     {
-        auto result = proc_runner_->run(args, std::chrono::seconds(60));
+        auto result = run_process(proc_runner_, args, std::chrono::seconds(60));
 
         if (!result.is_ok()) {
             return Result<void>::err(
@@ -303,7 +320,7 @@ Result<void> PartitionManager::create_partition_table(
         std::vector<std::string> partprobe_args = {"partprobe", device_path};
         // Best-effort — failure here is not fatal; wait_for_partitions
         // will pick up any transient issue.
-        proc_runner_->run(partprobe_args, std::chrono::seconds(15));
+        run_process(proc_runner_, partprobe_args, std::chrono::seconds(15));
     }
 
     // ---- Step 5: Wait for device nodes to materialise -----------------------
@@ -314,16 +331,16 @@ Result<void> PartitionManager::create_partition_table(
 // read_partition_table
 // =============================================================================
 
-Result<std::vector<PartitionSpec>> PartitionManager::read_partition_table(
+Result<PartitionLayout> PartitionManager::read_partition_table(
     const std::string& device_path)
 {
     std::lock_guard<std::mutex> lock(mutex_);
 
     std::vector<std::string> args = {"sgdisk", "--print", device_path};
-    auto result = proc_runner_->run(args, std::chrono::seconds(15));
+    auto result = run_process(proc_runner_, args, std::chrono::seconds(15));
 
     if (!result.is_ok()) {
-        return Result<std::vector<PartitionSpec>>::err(
+        return Result<PartitionLayout>::err(
             InstallerError::make(
                 ErrorCode::PARTITION_NOT_FOUND,
                 "Partition Not Found",
@@ -334,7 +351,7 @@ Result<std::vector<PartitionSpec>> PartitionManager::read_partition_table(
 
     const auto& proc = result.value();
     if (proc.exit_code != 0) {
-        return Result<std::vector<PartitionSpec>>::err(
+        return Result<PartitionLayout>::err(
             InstallerError::make(
                 ErrorCode::PARTITION_NOT_FOUND,
                 "Partition Not Found",
@@ -344,27 +361,42 @@ Result<std::vector<PartitionSpec>> PartitionManager::read_partition_table(
                 true));
     }
 
-    return parse_sgdisk_output(proc.stdout_data);
+    auto parse_result = parse_sgdisk_output(proc.stdout_data);
+    if (!parse_result.is_ok()) {
+        return Result<PartitionLayout>::err(parse_result.take_error());
+    }
+
+    PartitionLayout layout;
+    layout.table_type = "gpt";
+    layout.partitions = std::move(parse_result.value());
+    return Result<PartitionLayout>::ok(std::move(layout));
 }
 
 // =============================================================================
 // verify_partition_layout
 // =============================================================================
 
-Result<bool> PartitionManager::verify_partition_layout(
+Result<void> PartitionManager::verify_partition_layout(
     const std::string& device_path,
     const PartitionLayout& expected)
 {
     auto read_result = read_partition_table(device_path);
     if (!read_result.is_ok()) {
-        return Result<bool>::err(read_result.take_error());
+        return Result<void>::err(read_result.take_error());
     }
 
-    const auto& actual = read_result.value();
+    const auto& layout = read_result.value();
+    const auto& actual = layout.partitions;
 
     // ---- Check 1: Partition count -------------------------------------------
     if (actual.size() != expected.partitions.size()) {
-        return Result<bool>::ok(false);
+        return Result<void>::err(InstallerError::make(
+            ErrorCode::PARTITION_LAYOUT_MISMATCH,
+            "Partition Layout Mismatch",
+            "Partition count mismatch on " + device_path,
+            "expected=" + std::to_string(expected.partitions.size())
+                + " actual=" + std::to_string(actual.size()),
+            false));
     }
 
     // ---- Check 2: Individual partitions -------------------------------------
@@ -380,7 +412,12 @@ Result<bool> PartitionManager::verify_partition_layout(
         // whichever was found.
         std::string actual_name = ap.label.empty() ? ap.name : ap.label;
         if (actual_name != expected_name && ap.name != ep.name) {
-            return Result<bool>::ok(false);
+            return Result<void>::err(InstallerError::make(
+                ErrorCode::PARTITION_LAYOUT_MISMATCH,
+                "Partition Layout Mismatch",
+                "Partition name mismatch at index " + std::to_string(i),
+                "expected=" + expected_name + " actual=" + actual_name,
+                false));
         }
 
         // Check size within tolerance (±1 MiB for alignment variance)
@@ -388,17 +425,29 @@ Result<bool> PartitionManager::verify_partition_layout(
             int64_t diff = static_cast<int64_t>(ap.size_mib)
                            - static_cast<int64_t>(ep.size_mib);
             if (std::abs(diff) > 1) {
-                return Result<bool>::ok(false);
+                return Result<void>::err(InstallerError::make(
+                    ErrorCode::PARTITION_LAYOUT_MISMATCH,
+                    "Partition Layout Mismatch",
+                    "Partition size mismatch for '" + ap.name + "'",
+                    "expected=" + std::to_string(ep.size_mib)
+                        + " MiB actual=" + std::to_string(ap.size_mib) + " MiB",
+                    false));
             }
         }
 
         // Check filesystem type codes match
         if (ap.filesystem != ep.filesystem) {
-            return Result<bool>::ok(false);
+            return Result<void>::err(InstallerError::make(
+                ErrorCode::PARTITION_LAYOUT_MISMATCH,
+                "Partition Layout Mismatch",
+                "Filesystem type mismatch for '" + ap.name + "'",
+                "expected=" + std::to_string(static_cast<int>(ep.filesystem))
+                    + " actual=" + std::to_string(static_cast<int>(ap.filesystem)),
+                false));
         }
     }
 
-    return Result<bool>::ok(true);
+    return Result<void>::ok();
 }
 
 // =============================================================================
@@ -406,6 +455,7 @@ Result<bool> PartitionManager::verify_partition_layout(
 // =============================================================================
 
 Result<std::string> PartitionManager::get_partition_by_label(
+    const std::string& device,
     const std::string& label)
 {
     // ---- Strategy 1: /dev/disk/by-partlabel/<label> -------------------------
@@ -446,7 +496,7 @@ Result<std::string> PartitionManager::get_partition_by_label(
         std::vector<std::string> args = {
             "blkid", "-t", "PARTLABEL=" + label, "-o", "device"
         };
-        auto result = proc_runner_->run(args, std::chrono::seconds(5));
+        auto result = run_process(proc_runner_, args, std::chrono::seconds(5));
         if (result.is_ok() && result.value().exit_code == 0) {
             std::string dev = result.value().stdout_data;
             // Trim trailing whitespace / newline
@@ -465,7 +515,7 @@ Result<std::string> PartitionManager::get_partition_by_label(
         std::vector<std::string> devices = enumerate_block_devices();
         for (const auto& dev : devices) {
             std::vector<std::string> args = {"sgdisk", "--print", dev};
-            auto result = proc_runner_->run(args, std::chrono::seconds(10));
+            auto result = run_process(proc_runner_, args, std::chrono::seconds(10));
 
             if (!result.is_ok() || result.value().exit_code != 0) {
                 // Skip devices without a valid GPT (or other errors)
@@ -522,8 +572,8 @@ Result<void> PartitionManager::wait_for_partitions(
             "udevadm", "settle",
             "--timeout=" + std::to_string(timeout_sec)
         };
-        auto result = proc_runner_->run(
-            args,
+        auto result = run_process(
+            proc_runner_, args,
             std::chrono::seconds(timeout_sec + 5));
 
         if (result.is_ok() && result.value().exit_code == 0) {

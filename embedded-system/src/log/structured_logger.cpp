@@ -5,7 +5,7 @@
  * Internal design:
  *  - Two spdlog sinks are created:
  *      1. A rotating_file_sink_mt for all log levels.
- *      2. A stderr_sink_mt for WARN and above.
+ *      2. A stdout_color_sink_mt for WARN and above.
  *  - A custom formatter is used that expects the caller to pass a
  *    pre-formatted JSON string as the log message; the formatter appends
  *    a newline.
@@ -19,7 +19,7 @@
 #include "installer/core/types.h"
 
 #include <spdlog/sinks/rotating_file_sink.h>
-#include <spdlog/sinks/stderr_sink.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 
 #include <chrono>
@@ -64,7 +64,7 @@ struct StructuredLogger::Impl {
 
     Impl() {
         // Start with a stderr-only logger so log output is never lost.
-        auto stderr_sink = std::make_shared<spdlog::sinks::stderr_sink_mt>();
+        auto stderr_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
         stderr_sink->set_level(spdlog::level::warn);
 
         logger = std::make_shared<spdlog::logger>("installer", stderr_sink);
@@ -188,12 +188,12 @@ void StructuredLogger::log_event(LogLevel level,
     }
 }
 
-Result<void> StructuredLogger::set_log_file(const std::string& path) {
+void StructuredLogger::set_log_file(const std::string& path) {
     // Default rotation: 10 MB, keep 5 files
     return set_log_file_with_rotation(path, 10, 5);
 }
 
-Result<void> StructuredLogger::set_log_file_with_rotation(
+void StructuredLogger::set_log_file_with_rotation(
     const std::string& path, size_t max_size_mb, int max_files) {
     try {
         // Build a rotating file sink
@@ -202,7 +202,7 @@ Result<void> StructuredLogger::set_log_file_with_rotation(
         file_sink->set_level(spdlog::level::debug); // accept all levels
 
         // Reuse the existing stderr sink or make a fresh one
-        auto stderr_sink = std::make_shared<spdlog::sinks::stderr_sink_mt>();
+        auto stderr_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
         stderr_sink->set_level(spdlog::level::warn);
 
         spdlog::sinks_init_list sinks = {file_sink, stderr_sink};
@@ -224,16 +224,16 @@ Result<void> StructuredLogger::set_log_file_with_rotation(
             pimpl_->file_sink_active = true;
         }
 
-        return Result<void>::ok();
+        return;
     } catch (const spdlog::spdlog_ex& e) {
-        return Result<void>::err(InstallerError::make(
+        std::cerr << "[ERROR] Log file configuration failed" << std::endl; return; // InstallerError::make(
             ErrorCode::INTERNAL_CONFIG_ERROR,
             "Log File Error",
             "Failed to set log file: " + std::string(e.what()),
             e.what(),
             false, false));
     } catch (const std::exception& e) {
-        return Result<void>::err(InstallerError::make(
+        std::cerr << "[ERROR] Log file configuration failed" << std::endl; return; // InstallerError::make(
             ErrorCode::INTERNAL_ERROR,
             "Log Initialization Failed",
             "Unexpected error setting up log file: " + std::string(e.what()),

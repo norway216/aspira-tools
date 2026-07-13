@@ -54,7 +54,7 @@ Result<void> DetectHardwareStep::execute(JobContext& ctx, ProgressCallback progr
     auto info = dev_info.value();
     logger_->log(LogLevel::Info, step_id(), "device_found" + std::string(": ") + "path=" + info.path +
                        " model=" + info.model +
-                       " size=" + std::to_string(info.size_bytes, ctx.job_id) +
+                       " size=" + std::to_string(info.size_bytes) + " job=" + ctx.job_id +
                        " type=" + std::to_string(static_cast<int>(info.type)));
 
     if (progress) {

@@ -87,6 +87,12 @@ public:
      * risky operation where log integrity is critical.
      */
     virtual void flush() = 0;
+
+    // Convenience methods with shorter names
+    void debug(const std::string& msg) { log(LogLevel::Debug, "", msg); }
+    void info(const std::string& msg)  { log(LogLevel::Info,  "", msg); }
+    void warn(const std::string& msg)  { log(LogLevel::Warn,  "", msg); }
+    void error(const std::string& msg) { log(LogLevel::Error, "", msg); }
 };
 
 } // namespace installer
